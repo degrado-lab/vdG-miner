@@ -160,7 +160,7 @@ def cluster_structures(directory, cg='gn', cutoff=1.0,
     Parameters
     ----------
     directory : str
-        The directory containing the structures to cluster.\
+        The directory containing the structures to cluster.
     cg : str, optional
         The chemical group at the center of each structure, by default 'gn'.
     cutoff : float, optional

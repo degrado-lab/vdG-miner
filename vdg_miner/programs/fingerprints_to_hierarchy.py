@@ -1,5 +1,5 @@
 import os
-import sys
+import gzip
 import pickle
 import argparse
 import numpy as np
@@ -71,12 +71,53 @@ def create_symlinks_for_pdb_files(starting_dir, target_depth=2):
                                                 pdb_file_path, e))
 
 def get_atomgroup(environment, pdb_dir, cg, cg_match_dict, 
-                  align_atoms=[1, 0, 2], prev_struct=None):
+                  align_atoms=[1, 0, 2], pdb_gz=False, prev_struct=None):
+    """Generate a ProDy AtomGroup for a given environment.
+
+    Parameters
+    ----------
+    environment : list
+        List of tuples containing the SCR information for the environment.
+    pdb_dir : str
+        Path to directory containing PDB files in subdirectories named for the 
+        middle two characters of the PDB ID.
+    cg : str
+        Chemical group for which to generate a hierarchy.
+    cg_match_dict : dict
+        Dictionary of matching CGs in ligands with keys as tuples of
+        (struct_name, seg, chain, resnum, resname) for the ligand and
+        values as lists containing the list of atom names for each match
+        to the CG. Used for non-protein CGs.
+    align_atoms : list, optional
+        Indices of three atoms in the chemical group on which to align the 
+        environments. Default is [1, 0, 2].
+    pdb_gz : bool, optional
+        Whether the PDB files are gzipped. Default is False.
+    prev_struct : prody.AtomGroup, optional
+        AtomGroup of the previous environment. Default is None.
+
+    Returns
+    -------
+    struct : prody.AtomGroup
+        AtomGroup of the environment.
+    resnames : list
+        List of residue names for the environment.
+    whole_struct : prody.AtomGroup
+        AtomGroup of the whole structure from which the environment 
+        was extracted.
+    """
     biounit = environment[0][0]
     middle_two = biounit[1:3].lower()
-    pdb_file = os.path.join(pdb_dir, middle_two, biounit + '.pdb')
+    pdb_suffix = '.pdb'
+    if pdb_gz:
+        pdb_suffix += '.gz'
+    pdb_file = os.path.join(pdb_dir, middle_two, biounit + pdb_suffix)
     if prev_struct is None:
-        whole_struct = pr.parsePDB(pdb_file)
+        if pdb_gz:
+            with gzip.open(pdb_file, 'rt') as f:
+                whole_struct = pr.parsePDBStream(f)
+        else:
+            whole_struct = pr.parsePDB(pdb_file)
     else:
         whole_struct = prev_struct
     scrs = [(tup[1], tup[2], '`{}`'.format(tup[3])) if tup[3] < 0 else 
@@ -255,9 +296,8 @@ if __name__ == "__main__":
                         os.makedirs(hierarchy_path, exist_ok=True)
                         pdb_path = hierarchy_path + '/' + pdb_name + '.pdb'
                         pr.writePDB(pdb_path, atomgroup)
-
-    count_files_and_rename_dirs_at_depth(args.output_hierarchy_dir, 1)
-    create_symlinks_for_pdb_files(args.output_hierarchy_dir, 2)
+    # count_files_and_rename_dirs_at_depth(args.output_hierarchy_dir, 1)
+    # create_symlinks_for_pdb_files(args.output_hierarchy_dir, 2)
 
                             
 

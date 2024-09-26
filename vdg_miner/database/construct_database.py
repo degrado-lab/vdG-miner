@@ -1,5 +1,4 @@
 import os
-import re
 import sys
 import glob
 import gzip
@@ -7,11 +6,11 @@ import time
 import errno
 import signal
 import shutil
-import pickle
 import argparse
 import traceback
 
 import numpy as np
+import numba as nb
 import prody as pr
 
 from copy import deepcopy
@@ -19,7 +18,6 @@ from functools import wraps
 from scipy.spatial.distance import cdist
 
 from vdg_miner.database.readxml import extract_global_validation_values
-from vdg_miner.constants import three_to_one, non_prot_sel
 
 """
 Updated pdb files, validation reports, and sequence clusters should be 
@@ -37,6 +35,7 @@ downloaded via the pdb ftp server:
 These three paths should be provided using the -e, -v, and -c arguments to 
 this script, respectively.
 """
+
 
 class TimeoutError(Exception):
     pass
@@ -104,7 +103,8 @@ def read_clusters(cluster_file, job_id, num_jobs):
                     clusters[-1].append(member.split('_'))
             if len(clusters[-1]) == 0:
                 clusters.pop()
-    # assign to the current job approximately 1 / num_jobs of the clusters
+    # assign to the current job clusters corresponding to 1 / num_jobs of
+    # the total number of polymer entities
     cluster_cumsum = np.cumsum([len(c) for c in clusters])
     divisor = cluster_cumsum[-1] // num_jobs
     cluster_idxs = np.argwhere(cluster_cumsum // divisor == job_id).flatten()
@@ -249,10 +249,240 @@ def get_bio(path, return_header=False):
                 bio.setAnisous(None)
                 bio = [bio]
             return bio
+        
+
+def assign_hydrogen_segis(biounit, out_path=None):
+    """Assign segis to prepwizard-added atoms and rewrite the PDB file.
+
+    Parameters
+    ----------
+    biounit : prody.AtomGroup
+        ProDy AtomGroup for a biological assembly to which to assign segis.
+    out_path : str, optional
+        Path to which to write the PDB file with assigned segis.
+    """
+    struct = pr.parsePDB(biounit)
+    segis = struct.getSegnames()
+    coords = struct.getCoords()
+    dists = cdist(coords[segis == ''], 
+                  coords[segis != ''], 
+                  metric='sqeuclidean')
+    argmin_dists = np.argmin(dists, axis=1)
+    segis[segis == ''] = segis[segis != ''][argmin_dists]
+    struct.setSegnames(segis)
+    # reassign atom indices to circumvent a bug in PrepWizard output
+    # for multi-segment structures
+    segi_structs = [struct.select('segname ' + str(segi)).toAtomGroup() 
+                    for segi in np.sort(np.unique(segis).astype(int))]
+    struct = sum(segi_structs[1:], segi_structs[0])
+    # write the PDB file with assigned segis
+    if out_path is not None:
+        pr.writePDB(out_path, struct)
+    else:
+        pr.writePDB(biounit, struct)
 
 
-def write_biounits(ent_gz_path, pdb_outdir, max_ligands=None, 
-                   xtal_only=True, write=True):
+def preprocess_lines(pdb_lines, probe_lines, do_hash=True):
+    """Preprocess PDB and probe lines into numpy arrays for find_neighbors.
+
+    Parameters
+    ----------
+    pdb_lines : list of str
+        List of ATOM lines from a PDB file.
+    probe_lines : list of list of str
+        List of lines, split by the character ':', from a probe file.
+    do_hash : bool
+        Whether or not to hash the output arrays. Default: True.
+    
+    Returns
+    -------
+    pdb_array : np.ndarray [N, ...]
+        List of sliced ATOM lines from a PDB file, represented as an array.
+    probe_array : np.ndarray [M, ...]
+        List of sliced and rearranged lines from a probe file, represented 
+        as an array.
+    """
+    if do_hash: # hash the arrays for speed
+        # rearrange the sections of the probe lines that contain atom info 
+        # to match PDB format for both the first and second atoms
+        rearrangements_0 = []
+        rearrangements_1 = []
+        for i, probe_line in enumerate(probe_lines):
+            rearrangements_0.append(hash(probe_line[3][11:15] +
+                                         probe_line[3][6:11] +
+                                         probe_line[3][1:6]))
+            rearrangements_1.append(hash(probe_line[4][11:15] +
+                                         probe_line[4][6:11] +
+                                         probe_line[4][1:6]))
+        # 12:26 is atom name, resname, chain, and resnum
+        pdb_array = np.array([hash(line[12:26]) for line in pdb_lines], 
+                              dtype=np.int64)
+        probe_array = np.array([rearrangements_0, rearrangements_1], 
+                               dtype=np.int64).T
+    else:
+        # rearrange the sections of the probe lines that contain atom info 
+        # to match PDB format for both the first and second atoms
+        rearrangements_0 = []
+        rearrangements_1 = []
+        for probe_line in probe_lines:
+            rearrangements_0.append(probe_line[3][11:15] +
+                                    probe_line[3][6:11] +
+                                    probe_line[3][1:6])
+            rearrangements_1.append(probe_line[4][11:15] +
+                                    probe_line[4][6:11] +
+                                    probe_line[4][1:6])
+        # 12:26 is atom name, resname, chain, and resnum
+        pdb_array = np.array([line[12:26] for line in pdb_lines], 
+                             dtype=np.unicode_)
+        probe_array = np.array([rearrangements_0, rearrangements_1], 
+                               dtype=np.unicode_).T
+    return pdb_array, probe_array
+
+
+@nb.njit
+def find_neighbors(pdb_array, probe_array, pdb_coords, probe_coords):
+    """Using probe dot positions, find neighboring atoms in a PDB file.
+    
+    Parameters
+    ----------
+    pdb_array : np.ndarray [N, ...]
+        List of sliced ATOM and HETATM lines from a PDB file, represented 
+        as an array.
+    probe_array : np.ndarray [M, ...]
+        List of sliced and rearranged lines from a probe file, represented 
+        as an array.
+    pdb_coords : np.ndarray [N, 3]
+        The coordinates of the atoms in the PDB file.
+    probe_coords : np.ndarray [M, 3]
+        The coordinates of the probe dots.
+
+    Returns
+    -------
+    neighbors : np.ndarray [N, 2]
+        The indices (starting from 0) of neighboring atoms in the PDB file.
+    """
+    neighbors = -100000 * np.ones((len(probe_coords), 2), dtype=np.int64)
+    for i in range(len(probe_array)):
+        min_distance_0 = 100000
+        min_distance_1 = 100000
+        for j in range(len(pdb_array)):
+            if probe_array[i, 0] == pdb_array[j]:
+                distance = ((pdb_coords[j] - probe_coords[i])**2).sum()
+                if distance < min_distance_0:
+                    min_distance_0 = distance
+                    neighbors[i, 0] = j
+            if probe_array[i, 1] == pdb_array[j]:
+                distance = ((pdb_coords[j] - probe_coords[i])**2).sum()
+                if distance < min_distance_1:
+                    min_distance_1 = distance
+                    neighbors[i, 1] = j
+    return neighbors
+
+
+def consolidate_probe_output(pdb_file, probe_file):
+    """Consolidate probe output into a PDB file.
+
+    Parameters
+    ----------
+    pdb_file : str
+        Path to the PDB file that will receive the probe output in 
+        additional columns.
+    probe_file : str
+        Path to the probe output file to be consolidated.
+    """
+    with open(pdb_file, 'r') as f:
+        remark = f.readline()
+        pdb_lines = [line + ' ' * 12 * 9 for line in f.read().split('\n') 
+                     if line.startswith('ATOM')
+                     or line.startswith('HETATM')
+                     or line.startswith('TER')]
+    seg_ids = [line[72:76].strip() for line in pdb_lines]
+    pdb_coords = np.array([[float(line[30:38]),
+                            float(line[38:46]),
+                            float(line[46:54])]
+                           if not line.startswith('TER') 
+                           else [100000., 100000., 100000.]
+                           for line in pdb_lines])
+    with open(probe_file, 'r') as f:
+        probe_lines = [line.strip().replace('?', '2').split(':')
+                        for line in f.readlines()]
+    possible_cts = ['wc', 'cc', 'so', 'bo', 'wo', 'wh', 'hb']
+    # wide contact, close contact, small overlap, bad overlap, worse overlap, 
+    # weak hydrogen bond, hydrogen bond
+    contact_types = np.array([line[2] for line in probe_lines])
+    probe_coords = np.array([[float(line[8]), 
+                              float(line[9]), 
+                              float(line[10])] 
+                              for line in probe_lines])
+    pdb_array, probe_array = \
+        preprocess_lines(pdb_lines, probe_lines)
+    neighbors = \
+        find_neighbors(pdb_array, probe_array, pdb_coords, probe_coords)
+    for ct, (i, j) in zip(contact_types, neighbors):
+        if i == -100000 or j == -100000:
+            continue
+        flag = True # flag to determine if contact has not yet been added
+        for _ct in possible_cts[:possible_cts.index(ct)+1]:
+            contact_str = ' ' + _ct + ' ' + str(j + 1).rjust(5)
+            if contact_str in pdb_lines[i] and seg_ids[i] == seg_ids[j]:
+                if _ct == ct:
+                    flag = False
+                    break
+                start_idx = pdb_lines[i].index(contact_str)
+                pdb_lines[i] = \
+                    pdb_lines[i][:start_idx] + \
+                    ' ' + ct + ' ' + str(j + 1).rjust(5) + \
+                    pdb_lines[i][start_idx + 9:]
+                flag = False
+                break
+        if flag: # contact has not been added, so add it
+            for k in range(12):
+                start_idx = 80 + k * 9
+                if pdb_lines[i][start_idx:start_idx+9] != ' ' * 9:
+                    continue
+                pdb_lines[i] = \
+                    pdb_lines[i][:start_idx] + \
+                    ' ' + ct + ' ' + str(j + 1).rjust(5) + \
+                    pdb_lines[i][start_idx + 9:]
+                break
+    with open(pdb_file, 'w') as f:
+        f.write(remark)
+        for line in pdb_lines:
+            f.write(line + '\n')
+        f.write('END   \n')
+    os.remove(probe_file)
+
+
+class Structure:
+    """Class to represent a PDB structure and its associated data.
+    
+    Attributes
+    ----------
+    
+    Methods
+    -------
+    """
+    def __init__(self, pdb_id, pdb_indir, pdb_outdir, 
+                 prepwizard_path, molprobity_path, probe_path, 
+                 pdb_prototype):
+        self.pdb_id = pdb_id
+        self.pdb_outdir = pdb_outdir
+        self.pdb_prototype = pdb_prototype
+        self.prepwizard_path = prepwizard_path
+        self.molprobity_path = molprobity_path
+        self.probe_path = probe_path
+        middle_two = pdb_id[1:3].lower()
+        self.inpath = os.path.join(
+            pdb_indir, middle_two, pdb_prototype.format(self.pdb_id.lower())
+        )
+        self.output_subdir = os.path.join(pdb_outdir, middle_two)
+
+    def get_status(self):
+        """Get the status of the structure in the database."""
+        
+
+
+def write_biounits(ent_gz_path, pdb_outdir, xtal_only=True, write=True):
     """For an ent.gz file, write the biological assemblies as PDB files.
 
     Parameters
@@ -262,9 +492,6 @@ def write_biounits(ent_gz_path, pdb_outdir, max_ligands=None,
         biological assembly.
     pdb_outdir : str
         Directory at which to output PDB files for biological assemblies.
-    max_ligands : int, optional
-        Maximum number of heteroatom (i.e. non-protein, non-nucleic, and 
-        non-water) residues to permit in a biological assembly.
     xtal_only : bool, optional
         Whether to only consider X-ray crystallography structures.
     write : bool, optional
@@ -280,12 +507,14 @@ def write_biounits(ent_gz_path, pdb_outdir, max_ligands=None,
         List of sets of tuples, each consisting of a segment and chain 
         within each outputted biological assembly.
     """
+    pdb_code = ent_gz_path.split('/')[-1][3:7]
+    output_subdir = os.path.join(pdb_outdir, pdb_code[1:3])
+    os.makedirs(output_subdir, exist_ok=True)
     bio_paths = []
     segs_chains = []
     bio, header = get_bio(ent_gz_path, return_header=True)
     if xtal_only and 'X-RAY' not in header['experiment']:
         return [], []
-    pdb_code = ent_gz_path.split('/')[-1][3:7]
     bio_list = [int(b.getTitle().split()[-1]) for b in bio]
     author_assigned = get_author_assigned_biounits(ent_gz_path)
     if len(author_assigned) > 0:
@@ -297,58 +526,19 @@ def write_biounits(ent_gz_path, pdb_outdir, max_ligands=None,
                 continue
             # write biounit to PDB file
             bio_name = pdb_code.upper() + '_biounit_' + str(bio_list[i])
-            bio_dirname = os.path.join(pdb_outdir, pdb_code[1:3], bio_name)
-            bio_path = os.path.join(bio_dirname, bio_name + '.pdb')
-            os.makedirs(bio_dirname, exist_ok=True)
-            # in HPC contexts, account for the possibility that the biounit 
-            # was already created by another job and found to have high 
-            # MolProbity score, in which case the PDB file will have been 
-            # moved to the parent directory
-            parent_dirname = os.path.join(pdb_outdir, pdb_code[1:3])
-            hi_mp_path = os.path.join(parent_dirname, bio_name + '.pdb')
-            lo_mp_path = os.path.join(bio_dirname, 
-                                        bio_name + '_molprobity.out')
-            if write and not os.path.exists(bio_path) \
-                    and not os.path.exists(hi_mp_path) \
-                    and not os.path.exists(lo_mp_path):
+            bio_path = os.path.join(output_subdir, 
+                                    pdb_code.upper() + '_biounit_' + 
+                                    str(bio_list[i]) + '_unprepped.pdb')
+            bio_path_prepped = os.path.join(output_subdir, 
+                                            pdb_code.upper() + '_biounit_' + 
+                                            str(bio_list[i]) + '.pdb')
+            if write and not os.path.exists(bio_path_prepped):
                 pr.writePDB(bio_path, b)
             bio_paths.append(bio_path)
             segs_chains.append(set(zip(b.getSegnames(), b.getChids())))
         except:
             pass
     return bio_paths, segs_chains
-
-
-def assign_hydrogen_segis(biounit, out_path=None):
-    """Assign segis to hydrogen atoms in a biounit and rewrite the PDB file.
-
-    Parameters
-    ----------
-    biounit : prody.AtomGroup
-        ProDy AtomGroup for a biological assembly to which to assign segis.
-    out_path : str, optional
-        Path to which to write the PDB file with assigned segis.
-    """
-    struct = pr.parsePDB(biounit)
-    segis = struct.getSegnames()
-    elements = struct.getElements()
-    coords = struct.getCoords()
-    dists = cdist(coords[elements == 'H'], 
-                  coords[elements != 'H'], 
-                  metric='sqeuclidean')
-    argmin_dists = np.argmin(dists, axis=1)
-    segis[elements == 'H'] = segis[elements != 'H'][argmin_dists]
-    struct.setSegnames(segis)
-    # reassign atom indices to circumvent a bug in PrepWizard output
-    # for multi-segment structures
-    segi_structs = [struct.select('segname ' + str(segi)).toAtomGroup() 
-                    for segi in np.sort(np.unique(segis).astype(int))]
-    struct = sum(segi_structs[1:], segi_structs[0])
-    # write the PDB file with assigned segis
-    if out_path is not None:
-        pr.writePDB(out_path, struct)
-    else:
-        pr.writePDB(biounit, struct)
 
 
 @timeout(1800)
@@ -380,23 +570,29 @@ def prep_biounits(biounit_paths, prepwizard_path):
             continue # skip if biounit file is missing
         os.chdir(os.path.dirname(biounit_path))
         # format and execute command for Prepwizard
-        tmp_path = biounit_path[:-4] + '_prepped.pdb'
+        tmp_path = '_'.join(biounit_path.split('_')[:-1]) + '_prepped.pdb'
+        log_path = biounit_path[:-4] + '.log'
         cmd = ' '.join([prepwizard_path, biounit_path, tmp_path, 
-                        '-rehtreat', '-nobondorders', '-samplewater', 
-                        '-noimpref', '-use_PDB_pH'])
+                        '-rehtreat', '-samplewater', '-disulfides', '-mse', 
+                        '-glycosylation', '-noimpref', '-use_PDB_pH', 
+                        '-addOXT', '-keepfarwat'])
         os.system(cmd)
         # wait until prepwizard has finished
         while not os.path.exists(tmp_path) or \
                 time.time() - os.path.getmtime(tmp_path) < 5:
             time.sleep(1)
-        try:
-            assign_hydrogen_segis(tmp_path, biounit_path)
+        out_path = '_'.join(biounit_path.split('_')[:-1]) + '_unscored.pdb'
+        if True: # try:
+            assign_hydrogen_segis(tmp_path, out_path)
             prepped.append(True)
-        except:
+            os.remove(biounit_path)
+            os.remove(tmp_path)
+            os.remove(log_path)
+        if False: # except:
             prepped.append(False)
-        os.remove(tmp_path)
     os.chdir(cwd)
     return prepped
+
 
 def run_molprobity(pdb_path, molprobity_path, cutoff=2.0):
     """Run Molprobity on a PDB file and move the PDB if its score <= cutoff.
@@ -415,7 +611,6 @@ def run_molprobity(pdb_path, molprobity_path, cutoff=2.0):
     score : float
         The MolProbity score of the PDB file.
     """
-    log_path = pdb_path[:-4] + '.log' # prepwizard log file
     pdb_dirname = os.path.dirname(pdb_path)
     if not os.path.exists(pdb_dirname):
         # directory already removed for low MolProbity score (see below)
@@ -438,49 +633,43 @@ def run_molprobity(pdb_path, molprobity_path, cutoff=2.0):
                 f.seek(-2, os.SEEK_CUR)
         except OSError:
             f.seek(0)
-        score_line = f.readline().decode()
-    try:
+        score_line = f.readline().decode().split(':')
+    if len(score_line) > 2 and '.' in score_line[-2]:
         score = float(score_line.split(':')[-2])
-    except:
-        if os.path.exists(pdb_path):
-            os.remove(pdb_path)
-        if os.path.exists(log_path):
-            os.remove(log_path)
-        return 10000. # high score when score cannot be converted to float
+    else:
+        score = 10000. # high score when MolProbity output is absent
     if score <= cutoff: # move relevant files to parent directory
         parent_dirname = os.path.dirname(pdb_dirname)
-        if os.path.exists(pdb_path):
-            shutil.move(pdb_path, parent_dirname)
-        if os.path.exists(log_path):
-            shutil.move(log_path, parent_dirname)
-        if os.path.exists(out_path):
-            shutil.move(out_path, parent_dirname)
+        shutil.move(pdb_path, parent_dirname)
+        shutil.move(out_path, parent_dirname)
         if os.path.exists(pdb_dirname):
             # remove directory for low MolProbity score
             shutil.rmtree(pdb_dirname)
-    else: # save space by removing irrelevant files when score is high
-        if os.path.exists(pdb_path):
-            os.remove(pdb_path)
-        if os.path.exists(log_path):
-            os.remove(log_path)
+    elif os.path.exists(pdb_path): 
+        # save space by removing irrelevant files when score is high
+        os.remove(pdb_path)
     return score
 
 
-def run_probe(pdb_path, segi, chain, probe_path):
+def run_probe(pdb_path, probe_path, segi='', chain='', water=False):
     """Run probe on a PDB file to find interatomic contacts.
     
     Parameters
     ----------
     pdb_path : str
         Path to the PDB file on which to run probe.
-    segi : str
-        Segment ID for which to run probe.
-    chain : str
-        Chain ID for which to run probe.
     probe_path : str
         Path to the probe binary.
+    segi : str
+        Segment ID for which to run probe. If None, run probe 
+        for all segments.
+    chain : str
+        Chain ID for which to run probe. If None, run probe 
+        for all chains.
+    water : bool
+        If True, run probe for all water molecules in the PDB file.
     """
-    out_path = pdb_path[:-4] + '_' + segi + '_' + chain + '.probe'
+    probe_outpath = pdb_path[:-4] + '_' + segi + '_' + chain + '.probe'
     # -U : Unformatted output
     # -SEGID : use the PDB SegID field to discriminate between residues
     # -CON : raw output in condensed format, i.e. one line per contact
@@ -489,47 +678,61 @@ def run_probe(pdb_path, segi, chain, probe_path):
     # -DE32 : dot density of 32 dots per square Angstrom
     # -4 : extend bond chain dot removal to 4 for H
     # -ON : single intersection (src -> targ) 
-    # "WATER,HET,SEG{},CHAIN{}" "ALL" : between water, heteroatoms, or the 
-    #                                   desired chain and all other atoms
-    cmd = ('{} -U -SEGID -CON -NOFACE -WEAKH -DE32 -4H -ON '
-           '"WATER,HET,SEG{},CHAIN{}" "ALL" '
-           '{} > {}').format(probe_path, 
-                             segi.rjust(4, '_'), 
-                             chain.rjust(2, '_'), 
-                             pdb_path, 
-                             out_path)
+    # "WATER,SEG{},CHAIN{}" "ALL" : between water, the desired segment 
+    #                               and chain, and all other atoms
+    if segi is None:
+        cmd_template = ('{} -U -SEGID -CON -NOFACE -WEAKH -DE32 -4H -ON '
+                        '"CHAIN{}" "ALL" {} > {}')
+        cmd = cmd_template.format(probe_path, chain.rjust(2, '_'), 
+                                  pdb_path, probe_outpath)
+    elif chain is None:
+        cmd_template = ('{} -U -SEGID -CON -NOFACE -WEAKH -DE32 -4H -ON '
+                        '"SEG{}" "ALL" {} > {}')
+        cmd = cmd_template.format(probe_path, segi.rjust(4, '_'), 
+                                  pdb_path, probe_outpath)
+    elif water:
+        cmd_template = ('{} -U -SEGID -CON -NOFACE -WEAKH -DE32 -4H -ON '
+                        '"WATER" "ALL" {} > {}')
+        cmd = cmd_template.format(probe_path, pdb_path, probe_outpath)
+    else:
+        cmd_template = ('{} -U -SEGID -CON -NOFACE -WEAKH -DE32 -4H -ON '
+                        '"SEG{},CHAIN{}" "ALL" {} > {}')
+        cmd = cmd_template.format(probe_path, segi.rjust(4, '_'), 
+                                  chain.rjust(2, '_'), pdb_path, 
+                                  probe_outpath)
     os.system(cmd)
-    with open(out_path, 'rb') as f_in:
-        with gzip.open(out_path + '.gz', 'wb') as f_out:
-            shutil.copyfileobj(f_in, f_out)
-    os.remove(out_path)
+    # consolidate probe output into the PDB file
+    consolidate_probe_output(pdb_path, probe_outpath)
+    # with open(probe_path, 'rb') as f_in:
+    #     with gzip.open(probe_path + '.gz', 'wb') as f_out:
+    #         shutil.copyfileobj(f_in, f_out)
+    # os.remove(probe_path)
 
 
 def ent_gz_dir_to_vdg_db_files(ent_gz_dir, pdb_outdir, 
                                final_cluster_outpath, clusters, 
                                prepwizard_path, molprobity_path, 
                                probe_path, max_ligands=25, 
-                               prototype='pdb{}.ent.gz', 
-                               retry=False):
+                               prototype='pdb{}.ent.gz'):
     """Generate vdG database files from ent.gz files and validation reports.
 
     Parameters
     ----------
     ent_gz_dir : str
-        Path to directory containing ent.gz files from which to generate input 
-        files for COMBS database generation.
+        Path to directory containing ent.gz files from which to generate 
+        input files for COMBS database generation.
     pdb_outdir : str
         Directory at which to output fully prepared PDB files for biological 
         assemblies with minimal MolProbity scores.
     final_cluster_outpath : str
-        Path to output file at which to specify the biounits and chains that
-        are the lowest-Molprobity score representatives of the RCSB sequence
+        Path to output file at which to specify the biounits and chains that 
+        are the lowest-Molprobity score representatives of the RCSB sequence 
         clusters.
     clusters : list
-        List of list of clusters (tuples of PDB accession codes and entity IDs) 
-        to prepare with prepwizard and assess with MolProbity for database 
-        membership. If None, all PDB structures matching the prototype will be 
-        prepared.
+        List of list of clusters (tuples of PDB accession codes and entity 
+        IDs) to prepare with prepwizard and assess with MolProbity for 
+        database membership. If None, all structures in the subdirectories 
+        of ent_gz_dir that match the prototype will be prepared.
     prepwizard_path : str
         Path to Schrodinger Prepwizard binary.
     molprobity_path : str
@@ -541,8 +744,6 @@ def ent_gz_dir_to_vdg_db_files(ent_gz_dir, pdb_outdir,
         non-water) residues to permit in a biological assembly (Default: 25).
     prototype : str
         Prototype for the PDB filename (Default: 'pdb{}.ent.gz').
-    retry : bool
-        Run as if the code has already been run but did not complete.
     """
     for _dir in [ent_gz_dir, pdb_outdir]:
         if not os.path.exists(_dir):
@@ -554,19 +755,20 @@ def ent_gz_dir_to_vdg_db_files(ent_gz_dir, pdb_outdir,
             try:
                 pdb_code = ent[0].lower()
                 ent_gz_path = os.path.join(ent_gz_dir, pdb_code[1:3], 
-                                        prototype.format(pdb_code))
+                                           prototype.format(pdb_code))
                 identifier_chains_dict = parse_compnd(ent_gz_path)
                 chid = identifier_chains_dict[int(ent[1])]
                 bio_paths, segs_chains = \
                     write_biounits(ent_gz_path, pdb_outdir, max_ligands, 
-                                xtal_only=True, write=(not retry))
+                                   xtal_only=True)
                 prepped = prep_biounits(bio_paths, prepwizard_path)
                 cutoff = 2.0
                 scores = []
                 for bio_path, sc, flag in zip(bio_paths, segs_chains, prepped):
                     if not flag:
                         scores.append(10000) # high score when prep fails
-                    score = run_molprobity(bio_path, molprobity_path, cutoff)
+                    score = run_molprobity(bio_path, molprobity_path, cutoff, 
+                                           identifier_chains_dict)
                     scores.append(score)
                     if score <= cutoff:
                         new_bio_path = '/'.join(bio_path.split('/')[:-2] + 
@@ -587,6 +789,7 @@ def ent_gz_dir_to_vdg_db_files(ent_gz_dir, pdb_outdir,
             except Exception:
                 print('**************************************************')
                 traceback.print_exc(file=sys.stdout)
+                print('**************************************************')
         if len(min_molprobity_clusters[-1]) == 0:
             min_molprobity_clusters.pop()
     if len(min_molprobity_clusters):
@@ -627,10 +830,6 @@ def parse_args():
     argp.add_argument('-p', '--prototype', default='pdb{}.ent.gz',
                       help="Prototype for the PDB filename (Default: "
                       "'pdb{}.ent.gz').")
-    argp.add_argument('-r', '--retry', action='store_true', 
-                      help="Run as if the code has already been run but "
-                      "did not complete (i.e. finish generating the files "
-                      "that did not generate in an earlier run.")
     argp.add_argument('-j', '--job-index', type=int, default=0, 
                       help="Index for the current job, relevant for "
                       "multi-job HPC runs (Default: 0).")
@@ -654,4 +853,4 @@ if __name__ == "__main__":
                                args.final_cluster_outpath, 
                                clusters, args.prepwizard_path, 
                                args.molprobity_path, args.probe_path, 
-                               args.max_ligands, args.prototype, args.retry)
+                               args.max_ligands, args.prototype)

@@ -26,6 +26,10 @@ aas = ['ALA', 'ARG', 'ASN', 'ASP', 'CYS',
        'GLN', 'GLU', 'GLY', 'HIS', 'ILE', 
        'LEU', 'LYS', 'MET', 'PHE', 'PRO', 
        'SER', 'THR', 'TRP', 'TYR', 'VAL']
+b_aas = [b'ALA', b'ARG', b'ASN', b'ASP', b'CYS', 
+         b'GLN', b'GLU', b'GLY', b'HIS', b'ILE', 
+         b'LEU', b'LYS', b'MET', b'PHE', b'PRO', 
+         b'SER', b'THR', b'TRP', b'TYR', b'VAL']
 non_prot_sel = 'not resname ' + ' and not resname '.join(aas + ['MSE'])
 three_to_one = {'ALA' : 'A', 'ARG' : 'R', 'ASN' : 'N', 'ASP' : 'D',
                 'CYS' : 'C', 'GLN' : 'Q', 'GLU' : 'E', 'GLY' : 'G',
