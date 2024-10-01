@@ -482,3 +482,22 @@ def greedy(adj):
                                               '_HOH_' + pair[1] + 
                                               '_' + key)
         '''
+
+        '''
+    with gzip.open(probe_path, 'rb') as f:
+        for b_line in f:
+            if b_line[16:19] not in b_aas:
+                line = b_line.decode('utf-8')
+                resname = line[16:19].strip()
+                if not include_water and resname == 'HOH':
+                    continue
+                chain = line[14]
+                resnum = line[5:9].strip()
+                atom_num = line[0:4].strip()
+                key = (biounit, seg, chain, resnum, resname)
+                if key not in ligands.keys():
+                    ligands[key] = line
+                else:
+                    ligands[key] += line
+                atom_nums[atom_num] = key
+    '''
