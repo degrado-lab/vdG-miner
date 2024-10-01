@@ -120,15 +120,36 @@ def get_atomgroup(environment, pdb_dir, cg, cg_match_dict,
             whole_struct = pr.parsePDB(pdb_file)
     else:
         whole_struct = prev_struct
-    scrs = [(tup[1], tup[2], '`{}`'.format(tup[3])) if tup[3] < 0 else 
-            (tup[1], tup[2], tup[3]) for tup in environment]
     selstr_template = '(segment {} and chain {} and resnum {})'
     selstr_template_noseg = '(chain {} and resnum {})'
-    selstrs = [selstr_template.format(*scr) if len(scr[0]) else
-               selstr_template_noseg.format(*scr[1:]) for scr in scrs]
+    scrs, selstrs, selstrs_nbrs = [], [], []
+    for tup in environment:
+        if tup[3] < 0:
+            scr = (tup[1], tup[2], tup[3])
+        else:
+            scr = (tup[1], tup[2], '`{}`'.format(tup[3]))
+        scrs.append(scr)
+        if tup[3] - 5 < 0 and tup[3] + 5 < 0:
+            nbrs_scr = (tup[1], tup[2], 
+                        '`{}`:`{}`'.format(tup[3] - 5, tup[3] + 5))
+        elif tup[3] - 5 < 0:
+            nbrs_scr = (tup[1], tup[2], 
+                        '`{}`:{}'.format(tup[3] - 5, tup[3] + 5))
+        else:
+            nbrs_scr = (tup[1], tup[2], 
+                        '{}:{}'.format(tup[3] - 5, tup[3] + 5))
+        if len(scr[0]):
+            selstrs.append(selstr_template.format(*scr))
+            selstrs_nbrs.append(selstr_template.format(*nbrs_scr))
+        else:
+            selstrs.append(selstr_template_noseg.format(*scr[1:]))
+            selstrs_nbrs.append(selstr_template_noseg.format(*nbrs_scr[1:]))
     struct = whole_struct.select(
-        'same residue as within 5 of ({})'.format(' or '.join(selstrs[1:]))
+        ' or '.join(selstrs[:1] + selstrs_nbrs[1:])
     ).toAtomGroup()
+    # struct = whole_struct.select(
+    #     'same residue as within 5 of ({})'.format(' or '.join(selstrs[1:]))
+    # ).toAtomGroup()
     resnames = []
     for i, (scr, selstr) in enumerate(zip(scrs, selstrs)):
         try:
