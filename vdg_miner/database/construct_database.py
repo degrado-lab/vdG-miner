@@ -5,7 +5,6 @@ import gzip
 import time
 import errno
 import signal
-import shutil
 import argparse
 import traceback
 
@@ -466,7 +465,7 @@ def consolidate_probe_output(pdb_file, probe_file):
                 break
         if flag: # contact has not been added, so add it
             for k in range(12):
-                start_idx = 80 + k * 9
+                start_idx = 91 + k * 9
                 if pdb_lines[i][start_idx:start_idx+9] != ' ' * 9:
                     continue
                 pdb_lines[i] = \
@@ -589,6 +588,7 @@ def write_biounits(ent_gz_path, pdb_outdir, xtal_only=True, write=True):
             bio_path = os.path.join(output_subdir, bio_name, 
                                     bio_name + '.pdb')
             # write the biounit to a PDB file
+            b.setAltlocs(' ')
             if write:
                 pr.writePDB(bio_path, b.select('not element H'))
             bio_paths.append(bio_path)
