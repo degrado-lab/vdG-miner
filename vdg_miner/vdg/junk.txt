@@ -501,3 +501,22 @@ def greedy(adj):
                     ligands[key] += line
                 atom_nums[atom_num] = key
     '''
+
+    '''
+                # entity IDs of contacting residues and MolProbity score
+                contact_atom_ids = []
+                for i in range(11):
+                    contact_atom = b_line[92+9*i:92+9*(i+1)]
+                    if contact_atom != b'         ':
+                        contact_atom_ids.append(contact_atom[3:8])
+                try:
+                    contact_ents = ' '.join(
+                        set([pdb_code + '_' + 
+                            ent_ids[
+                                atom_ids.index(atom_id)
+                            ].decode('utf-8').strip()
+                            for atom_id in contact_atom_ids])
+                    )
+                except:
+                    return {}
+                '''

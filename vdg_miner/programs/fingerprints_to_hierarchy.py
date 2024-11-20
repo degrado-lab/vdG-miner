@@ -1,4 +1,5 @@
 import os
+import sys
 import gzip
 import pickle
 import argparse
@@ -68,7 +69,7 @@ def create_symlinks_for_pdb_files(starting_dir, target_depth=2):
                                 error = ("Failed to create symlink: {} -> {}, "
                                         "due to: {}")
                                 print(error.format(symlink_path, 
-                                                pdb_file_path, e))
+                                                   pdb_file_path, e))
 
 def get_atomgroup(environment, pdb_dir, cg, cg_match_dict, 
                   align_atoms=[1, 0, 2], pdb_gz=False, prev_struct=None):
@@ -111,7 +112,8 @@ def get_atomgroup(environment, pdb_dir, cg, cg_match_dict,
     pdb_suffix = '.pdb'
     if pdb_gz:
         pdb_suffix += '.gz'
-    pdb_file = os.path.join(pdb_dir, middle_two, biounit + pdb_suffix)
+    pdb_file = os.path.join(pdb_dir, middle_two, biounit, 
+                            biounit + pdb_suffix)
     if prev_struct is None:
         if pdb_gz:
             with gzip.open(pdb_file, 'rt') as f:
@@ -124,17 +126,14 @@ def get_atomgroup(environment, pdb_dir, cg, cg_match_dict,
     selstr_template_noseg = '(chain {} and resnum {})'
     scrs, selstrs, selstrs_nbrs = [], [], []
     for tup in environment:
-        if tup[3] < 0:
+        if tup[3] >= 0:
             scr = (tup[1], tup[2], tup[3])
         else:
             scr = (tup[1], tup[2], '`{}`'.format(tup[3]))
         scrs.append(scr)
-        if tup[3] - 5 < 0 and tup[3] + 5 < 0:
+        if tup[3] - 5 < 0 or tup[3] + 5 < 0:
             nbrs_scr = (tup[1], tup[2], 
-                        '`{}`:`{}`'.format(tup[3] - 5, tup[3] + 5))
-        elif tup[3] - 5 < 0:
-            nbrs_scr = (tup[1], tup[2], 
-                        '`{}`:{}'.format(tup[3] - 5, tup[3] + 5))
+                        '`{}:{}`'.format(tup[3] - 5, tup[3] + 5))
         else:
             nbrs_scr = (tup[1], tup[2], 
                         '{}:{}'.format(tup[3] - 5, tup[3] + 5))
@@ -145,38 +144,50 @@ def get_atomgroup(environment, pdb_dir, cg, cg_match_dict,
             selstrs.append(selstr_template_noseg.format(*scr[1:]))
             selstrs_nbrs.append(selstr_template_noseg.format(*nbrs_scr[1:]))
     struct = whole_struct.select(
-        ' or '.join(selstrs[:1] + selstrs_nbrs[1:])
+        ' or '.join(selstrs[:1] + selstrs_nbrs[1:]) + 
+        ' or (same residue as resname HOH within 3 of ({}))'.format(
+            ' or '.join(selstrs[:1])
+        )
     ).toAtomGroup()
     # struct = whole_struct.select(
     #     'same residue as within 5 of ({})'.format(' or '.join(selstrs[1:]))
     # ).toAtomGroup()
     resnames = []
-    for i, (scr, selstr) in enumerate(zip(scrs, selstrs)):
+    for scr, selstr in zip(scrs, selstrs):
         try:
             substruct = struct.select(selstr)
             resnames.append(substruct.getResnames()[0])
-            if i == 0:
+            if scr is scrs[0]:
                 if cg in cg_atoms.keys():
                     atom_names_list = cg_atoms[cg][resnames[0]]
                 else:
                     key = (biounit, scrs[0][0], scrs[0][1], 
-                           str(scrs[0][2]), resnames[0])
+                           str(scrs[0][2]).replace('`', ''), resnames[0])
+                    '''
+                    if key not in cg_match_dict.keys():
+                        print(environment, '\n', scrs, '\n', selstrs, '\n', resnames)
+                        print(key)
+                        print([k for k in cg_match_dict.keys() if 
+                               key[0] == k[0]])
+                        sys.exit()
+                    '''
                     atom_names_list = \
                         cg_match_dict[key][environment[0][4] - 1]
                 cg_atom_selstrs = \
                     ['name ' + atom_name 
                      for atom_name in atom_names_list]
                 align_coords = np.zeros((3, 3))
-                for j, selstr in enumerate(cg_atom_selstrs):
-                    atom_sel = substruct.select(selstr)
+                for j, cg_selstr in enumerate(cg_atom_selstrs):
+                    atom_sel = substruct.select(cg_selstr)
                     atom_sel.setOccupancies(3.0 + j * 0.1)
                     if j in align_atoms:
                         align_coords[align_atoms.index(j)] = \
                             atom_sel.getCoords()
             else:
                 substruct.setOccupancies(2.0)
-        except:
+        except Exception as e:
             print('Bad SCR: ', biounit, scr)
+            print('Exception:', e)
             return None, None, None
     d01 = align_coords[0] - align_coords[1]
     d21 = align_coords[2] - align_coords[1]

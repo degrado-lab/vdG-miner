@@ -1,4 +1,5 @@
 import os
+import sys
 import pickle
 import argparse
 import numpy as np
@@ -27,14 +28,6 @@ def parse_args():
                              "two-letter name, which is the second and "
                              "third characters of the PDB accession codes "
                              "of the structures in the directory.")
-    parser.add_argument('-b', '--probe-dir', required=True, type=str, 
-                        help="Path to the directory in which the gzipped "
-                             "probe files for the structures to mine "
-                             "are located. This directory should contain "
-                             "subdirectories with two-letter names, which "
-                             "are the second and third characters of the "
-                             "PDB accession codes of the structures with "
-                             "probe files in the directory.")
     parser.add_argument('-v', '--validation-dir', type=str, default='',
                         help="Path to the directory in which the gzipped "
                              "validation reports for the structures to mine "
@@ -60,11 +53,11 @@ def main():
     if args.cg_match_dict_pkl is not None:
         with open(args.cg_match_dict_pkl, 'rb') as f:
             cg_match_dict = pickle.load(f)
-        cg_natoms = len(cg_match_dict[list(cg_match_dict.keys())[0]])
-        vdg = VDG(cg, pdb_dir=args.pdb_dir, probe_dir=args.probe_dir,
+        cg_natoms = len(cg_match_dict[list(cg_match_dict.keys())[0]][0])
+        vdg = VDG(cg, pdb_dir=args.pdb_dir, 
                   validation_dir=args.validation_dir, cg_natoms=cg_natoms)
     else:
-        vdg = VDG(cg, pdb_dir=args.pdb_dir, probe_dir=args.probe_dir,
+        vdg = VDG(cg, pdb_dir=args.pdb_dir, 
                   validation_dir=args.validation_dir)
     fingerprints_dir = \
         os.path.join(args.outdir, '{}_fingerprints'.format(cg))
@@ -86,9 +79,11 @@ def main():
             all_environments.append(environments)
     elif args.cg_match_dict_pkl is not None:
         structs = set([key[0] for key in cg_match_dict.keys()])
-        subdicts = [{key: val for key, val in cg_match_dict.items() 
+        subdicts = [{key : val for key, val in cg_match_dict.items() 
                      if key[0] == struct} for i, struct in enumerate(structs)
                      if i % args.num_jobs == args.job_index]
+        # subdicts = [{key : val for key, val in cg_match_dict.items() 
+        #              if '4ACF' in key[0]}]
         for i, subdict in enumerate(subdicts):
             fingerprints, environments = \
                 vdg.mine_pdb(cg_match_dict=subdict)

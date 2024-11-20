@@ -41,6 +41,90 @@ def get_ABPLE(resname, phi, psi):
         return 'n'
     except KeyError:
         return 'n'
+    
+
+def neighbors_from_pdb_lines(pdb_lines, atoms_dict={}):
+    """Determine the neighbors of each atom in a database PDB file.
+
+    Parameters
+    ----------
+    pdb_lines : list of str
+        List of ATOM and HETATM lines from a PDB file.
+    atoms_dict : dict
+        Dictionary of residue names as keys paired with lists of atom names 
+        as values to find in the probe lines. Default: {}.
+
+    Returns
+    -------
+    neighbors : np.ndarray [N, 2]
+        The indices (starting from 0) of neighboring atoms in the PDB file.
+    contact_types : np.ndarray [N]
+        The contact type ('hb', 'wh', 'bo', 'so', 'wo', 'cc', 'wc') of each 
+        contact among the neighbors.
+    atoms_mask : np.ndarray [N]
+        Boolean array indicating whether each contact is made by an atom 
+        in the atoms_dict.
+    water_mask : np.ndarray [N]
+        Boolean array indicating whether each contact is made by an atom 
+        in a water molecule.
+    """
+    neighbors, contact_types, atoms_mask, water_mask = [], [], [], []
+    #assert '18a1c' in [line[6:11].strip() for line in pdb_lines]
+    #assert prody_hex_to_decimal['18a1c'] == '100892'
+    #assert '100892' in [prody_hex_to_decimal[line[6:11].strip()] for line in pdb_lines]
+    atom_ids = {prody_hex_to_decimal[line[6:11].strip()] : i
+                for i, line in enumerate(pdb_lines)}
+    for atom0_line, line in zip(atom_ids.values(), pdb_lines):
+        all_cts, cts_seen = [], []
+        counter, is_num = -1, True
+        for char in line[92:].strip():
+            if char == ' ' or char == '\n':
+                pass
+            elif is_num and char in '0123456789':
+                # current ct entry is a number and so is char, so 
+                # add char to it
+                all_cts[counter] += char
+            elif not is_num and char in '0123456789':
+                # current ct entry is not a number, so make a new one and 
+                # add char to it
+                all_cts.append(char)
+                is_num = True
+                counter += 1
+            elif not is_num:
+                # current ct entry is not a number and neither is char, so 
+                # add char to it
+                all_cts[counter] += char
+            else:
+                # current ct entry is a number but char is not, so make a new 
+                # one and add char to it
+                all_cts.append(char)
+                is_num = False
+                counter += 1
+        for ct, atom1_id in zip(all_cts[::2], all_cts[1::2]):
+            if int(atom1_id) >= 100000:
+                continue
+            atom1_line = atom_ids[atom1_id]
+            if (ct, atom1_line) not in cts_seen:
+                cts_seen.append((ct, atom1_line))
+                # subtract 1 to ensure 0-indexing
+                neighbors.append([atom0_line, atom1_line])
+                contact_types.append(ct)
+                if not len(atoms_dict):
+                    atoms_mask.append(True)
+                else:
+                    for res in atoms_dict.keys():
+                        for cg_atom_list in atoms_dict[res]:
+                            for atom in cg_atom_list:
+                                if res in line and atom in line:
+                                    atoms_mask.append(True)
+                                else:
+                                    atoms_mask.append(False)
+                if 'HOH' in line and 'HOH' not in pdb_lines[atom1_line]:
+                    water_mask.append(True)
+                else:
+                    water_mask.append(False)
+    return np.array(neighbors), np.array(contact_types), \
+           np.array(atoms_mask), np.array(water_mask)             
 
 
 def preprocess_lines(pdb_lines, probe_lines, atoms_dict={}, do_hash=True):
@@ -49,7 +133,7 @@ def preprocess_lines(pdb_lines, probe_lines, atoms_dict={}, do_hash=True):
     Parameters
     ----------
     pdb_lines : list of str
-        List of ATOM lines from a PDB file.
+        List of ATOM and HETATM lines from a PDB file.
     probe_lines : list of list of str
         List of lines, split by the character ':', from a probe file.
     atoms_dict : dict
@@ -88,15 +172,14 @@ def preprocess_lines(pdb_lines, probe_lines, atoms_dict={}, do_hash=True):
                                          probe_line[4][1:6]))
             if not len(atoms_dict):
                 atoms_mask[i] = True
-                water_mask[i] = True
             else:
                 for res in atoms_dict.keys():
                     for cg_atom_list in atoms_dict[res]:
                         for atom in cg_atom_list:
                             if res in probe_line[3] and atom in probe_line[3]:
                                 atoms_mask[i] = True
-                if 'HOH' in probe_line[3] and 'HOH' not in probe_line[4]:
-                    water_mask[i] = True
+            if 'HOH' in probe_line[3] and 'HOH' not in probe_line[4]:
+                water_mask[i] = True
         # 12:26 is atom name, resname, chain, and resnum
         pdb_array = np.array([hash(line[12:26]) for line in pdb_lines], 
                               dtype=np.int64)
@@ -200,7 +283,7 @@ class VDG:
     merge(other_vdg)
         Merge another vdG object with this vdG object.
     """
-    def __init__(self, cg, pdb_dir, probe_dir, validation_dir, 
+    def __init__(self, cg, pdb_dir, validation_dir, 
                  cg_natoms=None):
         if cg in cg_resnames.keys(): # CG is proteinaceous
             self.cg_resnames = cg_resnames[cg]
@@ -223,13 +306,21 @@ class VDG:
                             _aa_atom = '/'.join(aa_atom)
                         else:
                             _aa_atom = aa_atom
+                        if cg_resname in protein_atoms.keys() and \
+                                cg_atom not in protein_atoms[cg_resname]:
+                            for el in protein_atoms[cg_resname]:
+                                if isinstance(el, tuple) and cg_atom in el:
+                                    _cg_atom = '/'.join(el)
+                                    break
+                        else:
+                            _cg_atom = cg_atom
                         if _aa_atom in ['N', 'H', 'CA', 'HA', 'C', 'O']:
                             self.contact_cols.append(
-                                cg_resname + '_' + cg_atom + '_' + _aa_atom
+                                cg_resname + '_' + _cg_atom + '_' + _aa_atom
                             )
                         else:
                             self.contact_cols.append(
-                                cg_resname + '_' + cg_atom + '_' + 
+                                cg_resname + '_' + _cg_atom + '_' + 
                                 _aa_atom + '_' + aa_resname
                             )
                     for aa_atom in protein_hbond_atoms[aa_resname]:
@@ -237,13 +328,22 @@ class VDG:
                             _aa_atom = '/'.join(aa_atom)
                         else:
                             _aa_atom = aa_atom
+                        if cg_resname in protein_atoms.keys() and \
+                                cg_atom not in protein_atoms[cg_resname]:
+                            for el in protein_atoms[cg_resname]:
+                                if isinstance(el, tuple) and cg_atom in el:
+                                    _cg_atom = '/'.join(el)
+                                    break
+                        else:
+                            _cg_atom = cg_atom
                         if _aa_atom in ['N', 'H', 'CA', 'HA', 'C', 'O']:
                             self.contact_cols.append(
-                                cg_resname + '_' + cg_atom + '_HOH_' + _aa_atom
+                                cg_resname + '_' + _cg_atom + '_HOH_' + 
+                                _aa_atom
                             )
                         else:
                             self.contact_cols.append(
-                                cg_resname + '_' + cg_atom + '_HOH_' + 
+                                cg_resname + '_' + _cg_atom + '_HOH_' + 
                                 _aa_atom + '_' + aa_resname
                             )
         # determine the remaining columns for the fingerprint
@@ -256,7 +356,6 @@ class VDG:
         self.fingerprint_cols = self.contact_cols + self.ABPLE_cols + \
                                 self.relpos_cols  
         self.pdb_dir = pdb_dir
-        self.probe_dir = probe_dir
         self.validation_dir = validation_dir
         # convenience attributes to prevent unnecessary file reads
         self.prev_pdb_file = ''
@@ -264,7 +363,7 @@ class VDG:
         self.prev_pdb_lines = []
 
     def update_sc_info(self, sc_info, segi, chain, 
-                       pdb_file, probe_file, cg_match_dict=None):
+                       pdb_file, cg_match_dict=None):
         """Update the sc_info dict with information from a structure.
         
         Parameters
@@ -274,8 +373,6 @@ class VDG:
             that have been mined.
         pdb_file : str
             Path to the PDB file corresponding to the structure.
-        probe_file : str
-            Path to the probe.gz file encoding the contacts in the structure.
         segi : str
             Segment ID to mine from the structure.
         chain : str
@@ -310,6 +407,8 @@ class VDG:
             self.prev_pdb = pdb
             self.prev_pdb_lines = pdb_lines
         pdb_coords = pdb.getCoords()
+        struct_name = pdb_file.split('/')[-1].split('.')[0]
+        '''
         # compute neighbors between pdb atoms and probe dots
         with gzip.open(probe_file, 'rt') as f:
             probe_lines = [line.strip().replace('?', '2').split(':')
@@ -319,15 +418,6 @@ class VDG:
                                   float(line[10])] 
                                  for line in probe_lines])
         contact_types = np.array([line[2] for line in probe_lines])
-        # identify neighboring atoms based on probe input
-        struct_name = pdb_file.split('/')[-1].split('.')[0]
-        if 'XXX' in self.cg_atoms.keys(): # non-proteinaceous CG
-            cg_atoms_dict = {key[4] : val 
-                             for key, val in cg_match_dict.items() 
-                             if key[0] == struct_name}
-        else: # proteinaceous CG
-            cg_atoms_dict = {key : [val] 
-                             for key, val in self.cg_atoms.items()}
         # preprocess pdb and probe lines as integers for fast matching
         pdb_array, probe_array, atoms_mask, water_mask = \
             preprocess_lines(pdb_lines, probe_lines, cg_atoms_dict)
@@ -337,6 +427,18 @@ class VDG:
             find_neighbors(pdb_array, probe_array, pdb_coords, probe_coords)
         if -100000 in neighbors:
             return
+        '''
+        # extract interatomic contact information from PDB lines
+        if 'XXX' in self.cg_atoms.keys(): # non-proteinaceous CG
+            cg_atoms_dict = {key[4] : val 
+                             for key, val in cg_match_dict.items() 
+                             if key[0] == struct_name}
+        else: # proteinaceous CG
+            cg_atoms_dict = {key : [val] 
+                             for key, val in self.cg_atoms.items()}
+        print(pdb_file, segi, chain)
+        neighbors, contact_types, atoms_mask, water_mask = \
+            neighbors_from_pdb_lines(pdb_lines)
         neighbors_hb = \
             neighbors[np.logical_and(contact_types == 'hb', atoms_mask)]
         neighbors_hb_wat = \
@@ -345,15 +447,21 @@ class VDG:
         resindex_neighbors = pdb.getResindices()[neighbors]
         resindex_neighbors_wat = pdb.getResindices()[neighbors_hb_wat]
         # account for index of CG in residue for each neighbor
+        neighbor_resnums = pdb.getResnums()[neighbors[:, 0]]
         neighbor_resnames = pdb.getResnames()[neighbors[:, 0]]
         neighbor_atomnames = pdb.getNames()[neighbors[:, 0]]
         cg_idxs = np.zeros((len(neighbors), 1), dtype=np.int64)
-        for i, (rn, an) in enumerate(zip(neighbor_resnames, 
-                                         neighbor_atomnames)):
-            if rn in cg_atoms_dict.keys():
-                for j, an_list in enumerate(cg_atoms_dict[rn]):
-                    if an in an_list:
-                        cg_idxs[i] = j + 1
+        for i, (n, rn, an) in enumerate(zip(neighbor_resnums, 
+                                            neighbor_resnames, 
+                                            neighbor_atomnames)):
+            if cg_match_dict is not None:
+                key = (struct_name, segi, chain, str(n), rn)
+                if key in cg_match_dict.keys():
+                    for j, an_list in enumerate(cg_match_dict[key]):
+                        if an in an_list:
+                            cg_idxs[i] = j + 1
+            else:
+                cg_idxs[i] = 1
         resindex_neighbors = np.hstack([cg_idxs, resindex_neighbors])
         # determine neighboring non-water residues
         nonwater_resindices = \
@@ -478,9 +586,9 @@ class VDG:
         pdb_suffix = '.pdb'
         if pdb_gz:
             pdb_suffix += '.gz'
-        print(('Updating sc_info for cluster '
-               'of length {}').format(len(chain_cluster)))
         if chain_cluster is not None:
+            print(('Updating sc_info for cluster '
+               'of length {}').format(len(chain_cluster)))
             for mem in chain_cluster:
                 # resolve necessary paths
                 biounit = '_'.join(mem.split('_')[:-2])
@@ -490,31 +598,26 @@ class VDG:
                 middle_two = biounit[1:3].lower()
                 struct_name = biounit + '_' + segi + '_' + chain
                 pdb_file = os.path.join(self.pdb_dir, middle_two, 
-                                        biounit + pdb_suffix)
-                probe_file = os.path.join(self.probe_dir, middle_two, 
-                                          struct_name + '.probe.gz')
+                                        biounit, biounit + pdb_suffix)
                 validation_file = \
                     os.path.join(self.validation_dir, middle_two, pdb_acc, 
                                  pdb_acc + '_validation.xml.gz')
                 self.update_sc_info(sc_info, segi, chain, 
-                                    pdb_file, probe_file, 
-                                    cg_match_dict)
+                                    pdb_file, cg_match_dict)
         elif cg_match_dict is not None:
             for key in set([key[:3] for key in cg_match_dict.keys()]):
                 struct_name, segi, chain = key
                 middle_two = struct_name[1:3].lower()
                 pdb_file = os.path.join(self.pdb_dir, middle_two, 
+                                        struct_name,
                                         struct_name + pdb_suffix)
-                probe_file = os.path.join(self.probe_dir, middle_two, 
-                                          struct_name + '.probe.gz')
                 # TODO: change for long-term database file names with 
                 #       segi and chain
                 validation_file = \
                     os.path.join(self.validation_dir, middle_two, 
                                  struct_name + '_validation.xml.gz')
                 self.update_sc_info(sc_info, segi, chain, 
-                                    pdb_file, probe_file, 
-                                    cg_match_dict)
+                                    pdb_file, cg_match_dict)
         else:
             raise ValueError('Either chain_cluster or cg_match_dict '
                              'must not be None.')
@@ -588,11 +691,18 @@ class VDG:
                 env_idxs = []
                 chid0 = res_chids[_env_idxs[0]]
                 resnum0 = res_resnums[_env_idxs[0]]
+                resname0 = res_resnames[_env_idxs[0]]
                 for i, scrr in enumerate(zip(res_segs[_env_idxs], 
                                              res_chids[_env_idxs], 
                                              res_resnums[_env_idxs], 
                                              res_resnames[_env_idxs])):
                     seg, chid, resnum, resname = scrr
+                    if i == 0 and cg_match_dict is not None:
+                        key = (biounit, seg, chid, 
+                                       str(resnum), resname0)
+                        if key not in cg_match_dict.keys():
+                            # this CG was pruned for redundancy
+                            break
                     if i > 0 and resname not in aas:
                         continue
                     d_resnum = np.abs(resnum - resnum0)
@@ -605,8 +715,8 @@ class VDG:
                                 environment.append((biounit, seg, 
                                                     chid, resnum))
                             else:
-                                environment.append((biounit, seg, chid, 
-                                                    resnum, cg_idx))
+                                environment.append((biounit, seg, 
+                                                    chid, resnum, cg_idx))
                 if len(chids_resnums) < 2:
                     continue # No neighbors left.
                 if len(env_idxs) > self.max_nbrs:
@@ -671,11 +781,15 @@ class VDG:
                         # print('n in ABPLE')
                         continue
                     print('All conditions met.')
-                    fingerprints.append(
-                        self.get_fingerprint(env_idxs, 
-                                             sc_info[ent], 
-                                             ABPLE))
-                    environments.append(environment)
+                    fingerprint = self.get_fingerprint(env_idxs, 
+                                                       sc_info[ent], 
+                                                       ABPLE)
+                    # ensure every residue in the environment contacts 
+                    # (either directly or via water) the chemical group
+                    if fingerprint[:len(self.contact_cols)].sum() >= \
+                            len(env_idxs) - 1:
+                        fingerprints.append(fingerprint)
+                        environments.append(environment)
                 else:
                     print('Some conditions not met.')
         return np.array(fingerprints), environments
@@ -701,8 +815,10 @@ class VDG:
             associated with each particular fingerprint label is satisfied 
             by the environment.
         """
+        res_segis = np.array([r.getSegname() for r in 
+                              ent_sc_info['pdb'].iterResidues()])
         res_chids = np.array([r.getChid() for r in 
-                               ent_sc_info['pdb'].iterResidues()])
+                              ent_sc_info['pdb'].iterResidues()])
         res_resnums = np.array([r.getResnum() for r in 
                                 ent_sc_info['pdb'].iterResidues()])
         # set the bits corresponding to the contact types
@@ -721,17 +837,26 @@ class VDG:
                     # process CG
                     cg_resname = ent_sc_info['pdb'].getResnames()[pair[0]]
                     cg_atomname = ent_sc_info['pdb'].getNames()[pair[0]]
-                    cg_atomnames = ent_sc_info['cg_atoms_dict'][cg_resname]
-                    # if cg_atomname not in cg_atomnames:
-                    #     print(cg_atomname, 'not in CG atoms', cg_atomnames)
-                    #     continue
-                    if cg_resname in protein_atoms.keys(): # proteinaceous CG
+                    if cg_resname in protein_atoms.keys(): 
+                        # proteinaceous CG
+                        if cg_resname not in self.cg_atoms.keys() or \
+                                cg_atomname not in self.cg_atoms[cg_resname]:
+                            continue # atom not in CG
                         if cg_atomname not in protein_atoms[cg_resname]:
                             for el in protein_atoms[cg_resname]:
-                                if cg_atomname in el:
+                                if isinstance(el, tuple) and cg_atomname in el:
                                     cg_atomname = '/'.join(el)
                                     break
                     else: # non-proteinaceous CG; use generic names
+                        if cg_resname not in \
+                                ent_sc_info['cg_atoms_dict'].keys():
+                            continue
+                        cg_atomnames = \
+                            ent_sc_info['cg_atoms_dict'][cg_resname]
+                        # if cg_atomname not in cg_atomnames:
+                        #     print(cg_atomname, 'not in CG atoms', 
+                        #           cg_atomnames)
+                        #     continue
                         for match_atomnames in cg_atomnames:
                             cg_resname = 'XXX'
                             if cg_atomname in match_atomnames:
@@ -747,7 +872,7 @@ class VDG:
                     res_atomname = ent_sc_info['pdb'].getNames()[pair[1]]
                     if res_atomname not in protein_atoms[res_resname]:
                         for el in protein_atoms[res_resname]:
-                            if type(el) is tuple and res_atomname in el:
+                            if isinstance(el, tuple) and res_atomname in el:
                                 res_atomname = '/'.join(el)
                                 break
                     # determine contact type
@@ -788,14 +913,35 @@ class VDG:
                             ent_sc_info['pdb'].getResnames()[pair_0[0]]
                         cg_atomname = \
                             ent_sc_info['pdb'].getNames()[pair_0[0]]
-                        if cg_atomname not in self.cg_atoms[cg_resname]:
-                            # print(cg_atomname, 'not in CG atoms')
-                            continue
-                        if cg_atomname not in protein_hbond_atoms[cg_resname]:
-                            for el in protein_hbond_atoms[cg_resname]:
-                                if cg_atomname in el:
-                                    cg_atomname = '/'.join(el)
+                        if cg_resname in protein_hbond_atoms.keys():
+                            # proteinaceous CG
+                            if cg_atomname not in self.cg_atoms[cg_resname]:
+                                continue # atom not in CG
+                            if cg_atomname not in \
+                                    protein_hbond_atoms[cg_resname]:
+                                for el in protein_atoms[cg_resname]:
+                                    if isinstance(el, tuple) and \
+                                            cg_atomname in el:
+                                        cg_atomname = '/'.join(el)
+                                        break
+                        else: # non-proteinaceous CG; use generic names
+                            if cg_resname not in \
+                                    ent_sc_info['cg_atoms_dict'].keys():
+                                continue
+                            cg_atomnames = \
+                                ent_sc_info['cg_atoms_dict'][cg_resname]
+                            # if cg_atomname not in self.cg_atoms[cg_resname]:
+                            #     print(cg_atomname, 'not in CG atoms')
+                            #     continue
+                            for match_atomnames in cg_atomnames:
+                                cg_resname = 'XXX'
+                                if cg_atomname in match_atomnames:
+                                    cg_atomname = 'atom' + str(
+                                        match_atomnames.index(cg_atomname)
+                                    )
                                     break
+                            if not cg_atomname.startswith('atom'):
+                                continue # contact atom not in SMARTS fragment
                         res_resname = \
                             ent_sc_info['pdb'].getResnames()[pair_1[0]]
                         res_atomname = \
@@ -803,7 +949,8 @@ class VDG:
                         if res_atomname not in \
                                 protein_hbond_atoms[res_resname]:
                             for el in protein_hbond_atoms[res_resname]:
-                                if res_atomname in el:
+                                if isinstance(el, tuple) and \
+                                        res_atomname in el:
                                     res_atomname = '/'.join(el)
                                     break
                         if res_atomname in ['N', 'H', 'CA', 'HA', 'C', 'O']:
@@ -830,17 +977,20 @@ class VDG:
             fingerprint[fp_idx] = True
         # set the bits corresponding to the relative positions of residues
         for i in range(min(len(env_idxs) - 2, self.max_nbrs - 1)):
+            same_segi = res_segis[env_idxs[i + 2]] == \
+                        res_segis[env_idxs[i + 1]]
             same_chid = res_chids[env_idxs[i + 2]] == \
                         res_chids[env_idxs[i + 1]]
             relative_pos = res_resnums[env_idxs[i + 2]] - \
                            res_resnums[env_idxs[i + 1]]
-            if same_chid and relative_pos < 10:
+            if same_segi and same_chid and relative_pos < 10:
                 idx = i * len(relpos) + relative_pos - 1
                 try:
                     fp_idx = self.fingerprint_cols.index(self.relpos_cols[idx])
                 except:
                     print('Index error:', i, relative_pos, idx, len(self.relpos_cols))
-                    sys.exit()
+                    fingerprint[:] = False
+                    return fingerprint
                 fingerprint[fp_idx] = True
             elif same_chid:
                 idx = i * len(relpos) + 9

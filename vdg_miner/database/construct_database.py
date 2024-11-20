@@ -152,6 +152,7 @@ def filter_clusters(clusters, validation_dir, min_res=2.0, max_r=0.3):
                     filtered_clusters[-1].append((pdb, entity))
         if len(filtered_clusters[-1]) == 0:
             filtered_clusters.pop()
+    print(filtered_clusters)
     return filtered_clusters
 
 
@@ -741,15 +742,16 @@ def get_score(bio_path):
         The MolProbity score of the PDB file.
     """
     score = None
-    with open(bio_path, 'rb') as f:
-        for b_line in f:
-            if b_line.startswith(b'ATOM'):
-                if len(b_line) > 90:
-                    try:
-                        score = float(b_line[80:85].decode())
-                    except:
-                        pass
-                break
+    if os.path.exists(bio_path):
+        with open(bio_path, 'rb') as f:
+            for b_line in f:
+                if b_line.startswith(b'ATOM'):
+                    if len(b_line) > 90:
+                        try:
+                            score = float(b_line[80:85].decode())
+                        except:
+                            pass
+                    break
     return score
 
 
@@ -849,7 +851,7 @@ def ent_gz_dir_to_vdg_db_files(ent_gz_dir, pdb_outdir,
     min_molprobity_clusters = []
     for cluster in clusters:
         min_molprobity_clusters.append([])
-        min_cluster_score = 10000
+        min_cluster_score = 10000.
         for ent in cluster:
             try:
                 pdb_code = ent[0].lower()
@@ -894,7 +896,7 @@ def ent_gz_dir_to_vdg_db_files(ent_gz_dir, pdb_outdir,
                                 run_probe(bio_path, probe_path, seg, chain)
                 for bio_path, sc, score in \
                         zip(bio_paths, segs_chains, scores):
-                    if score <= min_cluster_score:
+                    if score is not None and score <= min_cluster_score:
                         if score < min_cluster_score:
                             min_molprobity_clusters[-1] = []
                             min_cluster_score = score

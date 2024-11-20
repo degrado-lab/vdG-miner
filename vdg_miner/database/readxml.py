@@ -57,29 +57,36 @@ def extract_residue_validation_values(validation_file, chids_resnums):
     # Parse the XML file
     with gzip.open(validation_file, 'rt') as f:
         tree = ET.parse(f)
+    with gzip.open(validation_file, 'rt') as f:
+        lines = f.readlines()
     root = tree.getroot()
 
     # Initialize arrays to store the values
-    rscc_values = np.zeros(len(chids_resnums))
+    rscc_values = np.ones(len(chids_resnums))
     rsr_values = np.zeros(len(chids_resnums))
     rsrz_values = np.zeros(len(chids_resnums))
 
     # Find the residue elements
-    chids, resnums = zip(*chids_resnums)
     for residue in root.findall(".//ModelledSubgroup"):
-        chain = residue.get("chain")
-        number = int(residue.get("resnum"))
-        tup = (chain, number)
+        chid = residue.get("chain")
+        resnum = int(residue.get("resnum"))
+        tup = (chid, resnum)
         if tup in chids_resnums:
             # Extract RSCC, RSR, and RSRZ values
             try:
                 # if tup not in rscc_dict.keys():
                 idx = chids_resnums.index(tup)
-                rscc_values[idx] = float(residue.get("rscc"))
-                rsr_values[idx] = float(residue.get("rsr"))
-                rsrz_values[idx] = float(residue.get("rsrz"))
+                rscc_val = residue.get("rscc")
+                rsr_val = residue.get("rsr")
+                rsrz_val = residue.get("rsrz")
+                if rscc_val is not None:
+                    rscc_values[idx] = float(residue.get("rscc"))
+                if rsr_val is not None:
+                    rsr_values[idx] = float(residue.get("rsr"))
+                if rsrz_val is not None:
+                    rsrz_values[idx] = float(residue.get("rsrz"))
             except:
                 print(('Could not extract validation values ' 
-                       'for residue {} in chain {}.').format(number, chain))
+                       'for residue {} in chain {}.').format(chid, resnum))
 
     return rscc_values, rsr_values, rsrz_values
