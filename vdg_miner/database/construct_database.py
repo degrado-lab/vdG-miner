@@ -784,12 +784,16 @@ def run_probe(pdb_path, probe_path, segi='', chain='', water=False):
     # -ON : single intersection (src -> targ) 
     # "WATER,SEG{},CHAIN{}" "ALL" : between water, the desired segment 
     #                               and chain, and all other atoms
-    if segi is None:
+    if segi == '' and chain == '':
+        cmd_template = ('{} -U -SEGID -CON -NOFACE -WEAKH -DE32 -4H -ON '
+                        '"ALL" "ALL" {} > {}')
+        cmd = cmd_template.format(probe_path, pdb_path, probe_outpath)
+    elif segi == '':
         cmd_template = ('{} -U -SEGID -CON -NOFACE -WEAKH -DE32 -4H -ON '
                         '"CHAIN{}" "ALL" {} > {}')
         cmd = cmd_template.format(probe_path, chain.rjust(2, '_'), 
                                   pdb_path, probe_outpath)
-    elif chain is None:
+    elif chain == '':
         cmd_template = ('{} -U -SEGID -CON -NOFACE -WEAKH -DE32 -4H -ON '
                         '"SEG{}" "ALL" {} > {}')
         cmd = cmd_template.format(probe_path, segi.rjust(4, '_'), 

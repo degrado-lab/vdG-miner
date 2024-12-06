@@ -12,7 +12,6 @@ seqdist_cols = [str(i) + '_' + str(i + 1) + '_' + rp for i, rp in
                 product(range(1, 10), relpos)]
 ABPLE_singleton_cols = [col.split('_')[0] + '_' + col.split('_')[1][1] 
                         for col in ABPLE_cols]
-cg_resnames = {'ccn' : ['LYS'], 'gn' : ['ARG'], 'coo' : ['ASP', 'GLU']}
 
 # Constants associated with ABPLE assignments
 _dir = os.path.dirname(__file__)
@@ -118,16 +117,21 @@ protein_atoms = {
 }
 cg_resnames = {'ccn' : ['LYS'], 
                'gn' : ['ARG'], 
-               'coo' : ['ASP', 'GLU']}
+               'coo' : ['ASP', 'GLU'], 
+               'cco' : ['SER', 'THR']}
 cg_atoms = {'ccn' : {'LYS' : ['CD', 'CE', 'NZ', 'HZ1', 'HZ2', 'HZ3']},
             'gn' : {'ARG' : ['NE', 'HE', 'CZ', 'NH1', 'HH11', 'HH12', 
                              'NH2', 'HH21', 'HH22']},
             'coo' : {'ASP' : ['CB', 'CG', 'OD1', 'OD2'],
-                     'GLU' : ['CG', 'CD', 'OE1', 'OE2']}}
+                     'GLU' : ['CG', 'CD', 'OE1', 'OE2']},
+            'cco' : {'SER' : ['CB', 'OG', 'HG'], 
+                     'THR' : ['CB', 'OG1', 'HG1']}}
 cg_hbond_atoms = {'ccn' : {'LYS' : ['HZ1', 'HZ2', 'HZ3']},
                   'gn' : {'ARG' : ['HE', 'HH11', 'HH12', 'HH21', 'HH22']},
                   'coo' : {'ASP' : ['OD1', 'OD2'],
-                           'GLU' : ['OE1', 'OE2']}}
+                           'GLU' : ['OE1', 'OE2']},
+                  'cco' : {'SER' : ['OG', 'HG'],
+                           'THR' : ['OG1', 'HG1']}}
 
 # constants associated with the periodic table
 elements = {

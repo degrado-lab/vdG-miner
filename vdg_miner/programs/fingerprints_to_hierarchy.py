@@ -169,6 +169,7 @@ def get_atomgroup(environment, pdb_dir, cg, cg_match_dict,
                         print(key)
                         print([k for k in cg_match_dict.keys() if 
                                key[0] == k[0]])
+                        print([k for k in cg_match_dict.keys()][:10])
                         sys.exit()
                     '''
                     atom_names_list = \
@@ -240,99 +241,93 @@ if __name__ == "__main__":
             cg_match_dict = pickle.load(f)
     else:
         cg_match_dict = {}
+    # iterate over subdirectories of the fingerprints directory, 
+    # corresponding to the middle two letters of the PDB files 
+    # in which environments were found
     for subdir in os.listdir(args.fingerprints_dir):
-        if '.txt' in subdir:
+        if not os.path.isdir(os.path.join(args.fingerprints_dir, subdir)):
             continue
-        for file in os.listdir(os.path.join(args.fingerprints_dir, subdir)):
-            if file.endswith('_fingerprints.npy'):
-                fingerprint_array = np.load(
-                    os.path.join(args.fingerprints_dir, subdir, file)
-                )
-                with open(
-                        os.path.join(
-                            args.fingerprints_dir, 
-                            subdir, 
-                            file.replace(
-                                '_fingerprints.npy', 
-                                '_environments.txt')
-                            ), 
-                            'r'
-                        ) as f:
-                    prev_pdb = ''
-                    for line, fingerprint in zip(f.readlines(), 
-                                                 fingerprint_array):
-                        if len(fingerprint) != len(fingerprint_cols):
-                            continue
-                        environment = eval(line.strip())
-                        pdb_name = '_'.join([str(el) for el in environment[0]])
-                        if prev_pdb == environment[0][0]:
-                            atomgroup, resnames, whole_struct = \
-                                get_atomgroup(environment, 
-                                              args.pdb_dir, args.cg, 
-                                              cg_match_dict=cg_match_dict,
-                                              align_atoms=args.align_atoms, 
-                                              prev_struct=whole_struct)
-                        else:
-                            atomgroup, resnames, whole_struct = \
-                                get_atomgroup(environment, 
-                                              args.pdb_dir, cg=args.cg, 
-                                              cg_match_dict=cg_match_dict,
-                                              align_atoms=args.align_atoms)
-                            prev_pdb = environment[0][0]
-                        if atomgroup is None:
-                            continue
-                        features = fingerprint_cols[fingerprint]
-                        features_no_contact = \
-                            [feature for feature in features 
-                             if feature[:3] != 'XXX' 
-                             or feature[:3] not in aas]
-                        current_res = 1
-                        dirs = [resnames[current_res]]
-                        while True:
-                            if dirs[-1] in aas:
-                                ABPLE = [feature for feature in 
-                                         features_no_contact 
-                                         if feature in ABPLE_cols and 
-                                         feature[0] == str(current_res)]
-                                if len(ABPLE):
-                                    if args.abple_singlets:
-                                        dirs.append(ABPLE[0].split('_')[0] + '_' + 
-                                                    ABPLE[0].split('_')[1][1])
-                                    else:
-                                        dirs.append(ABPLE[0])
-                                else:
-                                    break
-                            elif dirs[-1] in ABPLE_cols or \
-                                    dirs[-1] in ABPLE_singleton_cols:
-                                seqdist = [feature for feature in 
-                                           features_no_contact 
-                                           if feature in seqdist_cols and 
-                                           feature[0] == str(current_res)]
-                                if args.exclude_seqdist and len(seqdist):
-                                    dirs.append('seqdist_any')
-                                elif not args.exclude_seqdist and len(seqdist):
-                                    dirs.append('seqdist_' + seqdist[0][4:])
-                                else:
-                                    break
-                            elif 'seqdist' in dirs[-1]:
-                                current_res += 1
-                                if len(resnames) >= current_res:
-                                    dirs.append(resnames[current_res])
-                                else:
-                                    dirs.append('no_more_residues')
-                                    break
+        # iterate over fingerprints/environments files for 
+        # biological assemblies within each subdirectory
+        fingerprint_files = [
+            os.path.join(args.fingerprints_dir, subdir, file) for file in 
+            os.listdir(os.path.join(args.fingerprints_dir, subdir))
+            if file.endswith('_fingerprints.npy')
+        ]
+        for fingerprint_file in fingerprint_files:
+            fingerprints = np.load(fingerprint_file)
+            if fingerprints.shape[1] != len(fingerprint_cols):
+                continue # ensure fingerprints have the correct length
+            environment_file = fingerprint_file.replace('_fingerprints.npy', 
+                                                        '_environments.txt')
+            with open(environment_file, 'r') as f:
+                environments = [eval(line.strip()) for line in f.readlines()]
+            prev_pdb = ''
+            # iterate over environments from each biological assembly
+            for fingerprint, environment in zip(fingerprints, environments):
+                if prev_pdb == environment[0][0]:
+                    atomgroup, resnames, whole_struct = \
+                        get_atomgroup(environment, 
+                                        args.pdb_dir, args.cg, 
+                                        cg_match_dict=cg_match_dict,
+                                        align_atoms=args.align_atoms, 
+                                        prev_struct=whole_struct)
+                else:
+                    atomgroup, resnames, whole_struct = \
+                        get_atomgroup(environment, 
+                                        args.pdb_dir, cg=args.cg, 
+                                        cg_match_dict=cg_match_dict,
+                                        align_atoms=args.align_atoms)
+                    prev_pdb = environment[0][0]
+                if atomgroup is None:
+                    continue
+                features = fingerprint_cols[fingerprint]
+                features_no_contact = \
+                    [feature for feature in features 
+                        if feature[:3] != 'XXX' 
+                        or feature[:3] not in aas]
+                current_res = 1
+                dirs = [resnames[current_res]]
+                # construct the hierarchy, one directory at a time
+                while True:
+                    if dirs[-1] in aas:
+                        ABPLE = [feature for feature in 
+                                    features_no_contact 
+                                    if feature in ABPLE_cols and 
+                                    feature[0] == str(current_res)]
+                        if len(ABPLE):
+                            if args.abple_singlets:
+                                dirs.append(ABPLE[0].split('_')[0] + '_' + 
+                                            ABPLE[0].split('_')[1][1])
                             else:
-                                raise ValueError('Invalid feature: ', dirs[-1])
-                        hierarchy_path = \
-                            '/'.join([args.output_hierarchy_dir] + dirs)
-                        os.makedirs(hierarchy_path, exist_ok=True)
-                        pdb_path = hierarchy_path + '/' + pdb_name + '.pdb'
-                        pr.writePDB(pdb_path, atomgroup)
-    # count_files_and_rename_dirs_at_depth(args.output_hierarchy_dir, 1)
-    # create_symlinks_for_pdb_files(args.output_hierarchy_dir, 2)
-
-                            
-
-
-                        
-                        
+                                dirs.append(ABPLE[0])
+                        else:
+                            break
+                    elif dirs[-1] in ABPLE_cols or \
+                            dirs[-1] in ABPLE_singleton_cols:
+                        seqdist = [feature for feature in 
+                                    features_no_contact 
+                                    if feature in seqdist_cols and 
+                                    feature[0] == str(current_res)]
+                        if args.exclude_seqdist and len(seqdist):
+                            dirs.append('seqdist_any')
+                        elif not args.exclude_seqdist and len(seqdist):
+                            dirs.append('seqdist_' + seqdist[0][4:])
+                        else:
+                            break
+                    elif 'seqdist' in dirs[-1]:
+                        current_res += 1
+                        if len(resnames) >= current_res:
+                            dirs.append(resnames[current_res])
+                        else:
+                            dirs.append('no_more_residues')
+                            break
+                    else:
+                        raise ValueError('Invalid feature: ', dirs[-1])
+                # write the environment to a PDB file
+                pdb_name = '_'.join([str(el) for el in environment[0]])
+                hierarchy_path = \
+                    '/'.join([args.output_hierarchy_dir] + dirs)
+                os.makedirs(hierarchy_path, exist_ok=True)
+                pdb_path = hierarchy_path + '/' + pdb_name + '.pdb'
+                pr.writePDB(pdb_path, atomgroup)

@@ -5,7 +5,7 @@ import numpy as np
 import numba as nb
 import prody as pr
 
-from itertools import product
+from itertools import product, permutations
 from scipy.spatial.distance import cdist
 
 from vdg_miner.constants import *
@@ -112,13 +112,14 @@ def neighbors_from_pdb_lines(pdb_lines, atoms_dict={}):
                 if not len(atoms_dict):
                     atoms_mask.append(True)
                 else:
+                    to_append = False
                     for res in atoms_dict.keys():
                         for cg_atom_list in atoms_dict[res]:
                             for atom in cg_atom_list:
                                 if res in line and atom in line:
-                                    atoms_mask.append(True)
-                                else:
-                                    atoms_mask.append(False)
+                                    to_append = True
+                                    break
+                    atoms_mask.append(to_append)
                 if 'HOH' in line and 'HOH' not in pdb_lines[atom1_line]:
                     water_mask.append(True)
                 else:
@@ -438,7 +439,7 @@ class VDG:
                              for key, val in self.cg_atoms.items()}
         print(pdb_file, segi, chain)
         neighbors, contact_types, atoms_mask, water_mask = \
-            neighbors_from_pdb_lines(pdb_lines)
+            neighbors_from_pdb_lines(pdb_lines, cg_atoms_dict)
         neighbors_hb = \
             neighbors[np.logical_and(contact_types == 'hb', atoms_mask)]
         neighbors_hb_wat = \
@@ -524,7 +525,7 @@ class VDG:
                 'cg_atoms_dict' : cg_atoms_dict,
                 'mask' : mask,
                 'rmask' : rmask,
-                'neighbors' : neighbors_masked, 
+                'neighbors' : neighbors_masked,
                 'neighbors_hb' : neighbors_hb_masked, 
                 'nonwater_neighbors' : nonwater_neighbors_masked,
                 'water_bridges' : water_bridges_masked, 
@@ -778,18 +779,32 @@ class VDG:
                         if 'n' in triplet:
                             do_continue = True
                     if do_continue:
-                        # print('n in ABPLE')
                         continue
+                    ABPLE = np.array(ABPLE)
+                    # generate fingerprints for each permutation of 
+                    # segment/chain fragments in the environment
+                    segs_chains = {(res_segs[idx], res_chids[idx]) 
+                                   for idx in env_idxs[1:]}
+                    for perm_sc in permutations(segs_chains):
+                        perm = np.arange(len(env_idxs))
+                        if len(segs_chains) > 1:
+                            start = 1
+                            for (seg, chid) in perm_sc:
+                                idxs = np.argwhere(
+                                    np.logical_and(
+                                        res_segs[env_idxs[1:]] == seg,
+                                        res_chids[env_idxs[1:]] == chid
+                                    )
+                                ).flatten() + 1
+                                perm[start:start+len(idxs)] = idxs
+                                start += len(idxs)
+                        fingerprint = self.get_fingerprint(env_idxs[perm], 
+                                                           sc_info[ent], 
+                                                           ABPLE[perm[1:]-1])
+                        if np.any(fingerprint):
+                            fingerprints.append(fingerprint)
+                            environments.append([environment[i] for i in perm])
                     print('All conditions met.')
-                    fingerprint = self.get_fingerprint(env_idxs, 
-                                                       sc_info[ent], 
-                                                       ABPLE)
-                    # ensure every residue in the environment contacts 
-                    # (either directly or via water) the chemical group
-                    if fingerprint[:len(self.contact_cols)].sum() >= \
-                            len(env_idxs) - 1:
-                        fingerprints.append(fingerprint)
-                        environments.append(environment)
                 else:
                     print('Some conditions not met.')
         return np.array(fingerprints), environments
@@ -829,7 +844,6 @@ class VDG:
                 ent_sc_info['nonwater_neighbors'][:, 2] == env_idx, 
             ).sum()
             if is_direct: # direct contact
-                # print('IS DIRECT')
                 atom_pairs = self.res_contact_to_atom_contacts(
                     env_idxs[0], env_idx, ent_sc_info
                 )
@@ -899,7 +913,6 @@ class VDG:
                 )
             ]
             if len(bridging_waters): # water bridge
-                # print('WATER BRIDGE')
                 for bridging_water in bridging_waters:
                     atom_pairs_0 = self.res_contact_to_atom_contacts(
                         env_idxs[0], bridging_water, ent_sc_info, True

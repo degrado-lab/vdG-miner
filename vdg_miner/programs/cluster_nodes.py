@@ -2,11 +2,12 @@ import os
 import sys
 import glob
 import argparse
+import subprocess
 from pathlib import Path
 from functools import partial
 from multiprocessing import Pool
-from itertools import permutations
 from collections import defaultdict
+from itertools import permutations, combinations
 
 import numpy as np
 import prody as pr
@@ -46,6 +47,39 @@ def rebase_path(child_path, old_parent, new_parent):
     return str(new_path)
 
 
+def is_contained(u, v):
+    """Determine whether there exists a mask such that np.all(u == v[mask])
+    
+    Parameters
+    ----------
+    u : np.array [M]
+        The array for which containment in v is to be checked.
+    v : np.array [N]
+        The array for which containment of u is to be checked. Requires N > M.
+
+    Returns
+    -------
+    contained : bool
+        The boolean value of np.all(u == v[mask]); in other words, True is 
+        returned if u is contained in v, and False otherwise.
+    """
+    unique_u, counts_u = np.unique(u, return_counts=True)
+    unique_v, counts_v = np.unique(v, return_counts=True)
+
+    # match unique elements in u to those in v
+    match_indices = np.isin(unique_u, unique_v)
+
+    # return False if any element of u is not in v
+    if not np.all(match_indices):
+        return False
+    
+    # get indices where unique_u elements appear in unique_v
+    indices_in_v = np.searchsorted(unique_u, unique_v)
+
+    # check if counts in v are greater than or equal to those in u
+    return np.all(counts_u <= counts_v[indices_in_v])
+
+
 def permute_with_symmetry(symmetry_classes):
     """Get all possible permutation arrays that preserve symmetry classes.
     
@@ -75,6 +109,7 @@ def permute_with_symmetry(symmetry_classes):
         if is_valid:
             valid_permutations.append(np.array(perm))
     return valid_permutations
+
 
 def greedy(adj_mat, min_cluster_size=2):
     """Greedy clustering algorithm based on an adjacency matrix.
@@ -174,8 +209,8 @@ def kabsch(X, Y, w=None):
         w = w.reshape((1, -1, 1)) / w.sum()
     Xw, Yw = X * w, Y * w
     # compute R using the Kabsch algorithm
-    Xbar, Ybar = np.mean(Xw, axis=1, keepdims=True), \
-                 np.mean(Yw, axis=1, keepdims=True)
+    Xbar, Ybar = np.sum(Xw, axis=1, keepdims=True), \
+                 np.sum(Yw, axis=1, keepdims=True)
     Xc, Yc = Xw - Xbar, Yw - Ybar
     H = np.matmul(np.transpose(Xc, (0, 2, 1)), Yc)
     U, S, Vt = np.linalg.svd(H)
@@ -192,21 +227,122 @@ def kabsch(X, Y, w=None):
     return R, t, msd
 
 
-def cluster_structures(directory, starting_dir, outdir, target_depth, 
+def construct_nodes(starting_dir, target_depth=1):
+    """Construct the tree of CG envs from fingerprints_to_hierarchy output
+    
+    Parameters
+    ----------
+    starting_dir : str
+        Path to the top-level directory of the hierarchy that was output from 
+        fingerprints_to_hierarchy.py
+    target_depth : int, optional
+        The depth in the tree of possible chemical group pocket structures 
+        below which to cluster the structures corresponding to each node. 
+        Default: 1.
+
+    Returns
+    -------
+    nodes_dict : dict
+        Dictionary with nodes in the tree of possible chemical group pocket 
+        structures (represented as tuples of strings of the form 
+        'seqdist_#/AA_name/ABPLE_triplet' for each residue in the pocket) as 
+        keys and, as values, lists of 2-tuples containing a full path to a 
+        directory in the hierarchy of the starting_dir with PDB files that 
+        match the node and a tuple of indices of the subset of contacting 
+        residues that match the node.
+    """
+    basename = os.path.basename(starting_dir)
+    nodes_dict = defaultdict(list)
+    # find all directories in the hierarchy within starting_dir
+    cmd = ["find", starting_dir, "-type", "d"]
+    result = subprocess.run(cmd, text=True, capture_output=True, check=True)
+    folders = result.stdout.splitlines()
+    # for each folder, determine all possible nodes and add to nodes_dict
+    for full_folder in folders:
+        folder = full_folder[len(starting_dir)-len(basename):]
+        split = folder.split('/')
+        # there are three types of folder: amino acid, ABPLE, and seqdist; 
+        # only construct nodes for the ABPLE-type folders
+        if len(split) < 3 or len(split[-1]) == 3 or 'seqdist' in split[-1]:
+            continue
+        # construct all possible tree nodes corresponding to this directory
+        residues = []
+        n = len(split) // 3
+        for i in range(n):
+            seqdist = split[3*i]
+            aa = split[3*i+1]
+            abple = split[3*i+2].split('_')[1]
+            if i == 0:
+                residues.append(aa + '/' + abple)
+            else:
+                residues.append(seqdist + '/' + aa + '/' + abple)
+        for r in range(target_depth, n + 1):
+            for indices in combinations(range(n), r):
+                # construct key for nodes_dict
+                if indices[0] > 0:
+                    key = \
+                        ['/'.join(residues[indices[0]].split('/')[1:])] + \
+                        [residues[i] for i in indices[1:]]
+                else:
+                    key = [residues[i] for i in indices]
+                # adjust seqdists to account for skipped residues
+                seqdist_sum = 0
+                for i in range(indices[0] + 1, n):
+                    res_split = residues[i].split('/')
+                    if res_split[0] == 'seqdist_any':
+                        seqdist_sum = 1000000
+                    elif res_split[0] == 'seqdist_diff_chain':
+                        seqdist_sum = 100000
+                    elif res_split[0] == 'seqdist_same_chain':
+                        seqdist_sum = 10
+                    elif seqdist_sum < 10:
+                        seqdist_sum += int(res_split[0].split('_')[1])
+                    if i in indices:
+                        if seqdist_sum == 1000000:
+                            res_split[0] = 'seqdist_any'
+                        elif seqdist_sum == 100000:
+                            res_split[0] = 'seqdist_diff_chain'
+                        elif seqdist_sum >= 10:
+                            res_split[0] = 'seqdist_same_chain'
+                        elif seqdist_sum > 0:
+                            res_split[0] = 'seqdist_' + str(seqdist_sum)
+                        key[indices.index(i)] = '/'.join(res_split)
+                        seqdist_sum = 0
+                # add full_folder to the list of hierarchy directories 
+                # that match the node
+                new_match = True
+                for match in nodes_dict[tuple(key)]:
+                    if match[0] in full_folder:
+                        new_match = False
+                        break
+                if new_match:
+                    nodes_dict[tuple(key)].append((full_folder,
+                                                   indices))
+    return nodes_dict
+
+
+def cluster_structures(node, nodes_dict, starting_dir, outdir, 
                        cg='gn', cutoff=1.0, idxs=None, symmetry_classes=None):
-    """Greedily cluster the structures in a directory based on RMSD.
+    """Greedily cluster the structures at a node based on RMSD.
 
     Parameters
     ----------
-    directory : str
-        The directory containing the structures to cluster.
+    node : tuple
+        The node in the tree of possible chemical group pocket structures 
+        for which to cluster the corresponding structures.
+    nodes_dict : dict
+        Dictionary with nodes in the tree of possible chemical group pocket 
+        structures (represented as tuples of strings of the form 
+        'seqdist_#/AA_name/ABPLE_triplet' for each residue in the pocket) as 
+        keys and, as values, lists of 2-tuples containing a full path to a 
+        directory in the hierarchy of the starting_dir with PDB files that 
+        match the node and a tuple of indices of the subset of contacting 
+        residues that match the node.
     starting_dir : str
         The top-level directory of the hierarchy.
     outdir : str
         The new top-level directory at which the clustered structures will be 
         output.
-    target_depth : int
-        The depth below which directories should be clustered.
     cg : str, optional
         The chemical group at the center of each structure, by default 'gn'.
     cutoff : float, optional
@@ -220,79 +356,52 @@ def cluster_structures(directory, starting_dir, outdir, target_depth,
         length as idxs. If not provided, the atoms are assumed to be
         symmetrically inequivalent.
     """
-    def get_depth(path):
-        return path[len(starting_dir):].count(os.sep)
-    current_depth = get_depth(directory)
-    if current_depth < target_depth or \
-            'seqdist' in os.path.basename(directory) or \
-            '_' not in os.path.basename(directory):
-        # current directory is not an ABPLE-labeled directory
-        return
-    subdirs = directory.split('/')
-    node_aas = []
-    node_aa_counts = {aa : 0 for aa in aas}
-    for i, subdir in enumerate(subdirs):
-        flag = False
-        for aa in aas:
-            if subdir[:3] == aa:
-                node_aas.append((aa, node_aa_counts[aa]))
-                node_aa_counts[aa] += 1
-                flag = True # the most recent subdir is an amino acid
-                break
-        '''
-        if i == len(subdirs) - 2 and not flag:
-            # the second-to-last parent subdirectory is not an amino acid
-            return
-        '''
-    pdbs = [os.path.realpath(f) for f in 
-            glob.glob(directory + '/**/*.pdb', recursive=True)]
-    #         if 'clusters' not in f]
-    structs = [pr.parsePDB(pdb) for pdb in pdbs]
-    if idxs is None:
-        occs0 = structs[0].getOccupancies()
-        idxs = list(range((occs0 >= 3.).sum()))
-    if symmetry_classes is None:
-        symmetry_classes = list(range(len(idxs)))
-    assert len(symmetry_classes) == len(idxs), \
-        'Length of symmetry_classes must match length of idxs.'
-    perms = permute_with_symmetry(symmetry_classes)
-    coords = []
-    for i in range(len(pdbs)):
-        occs = structs[i].getOccupancies()
-        names = structs[i].getNames()
-        resnames = structs[i].getResnames()
-        all_coords = structs[i].getCoords()
-        cg_idxs = np.array(
-            [np.argwhere(occs == 3. + 0.1 * idx)[0][0] for idx in idxs]
-        )
-        coords_to_add = []
-        for perm in perms:
-            perm_coords = []
-            perm_coords.append(
-                all_coords[cg_idxs[perm]]
+    all_pdbs, all_structs, coords = [], [], []
+    for directory, res_idxs in nodes_dict[node]:
+        pdbs = [os.path.realpath(f) for f in 
+                glob.glob(directory + '/**/*.pdb', recursive=True)]
+        all_pdbs += pdbs
+        structs = [pr.parsePDB(pdb) for pdb in pdbs]
+        all_structs += structs
+        if idxs is None:
+            occs0 = structs[0].getOccupancies()
+            idxs = list(range((occs0 >= 3.).sum()))
+        if symmetry_classes is None:
+            symmetry_classes = list(range(len(idxs)))
+        assert len(symmetry_classes) == len(idxs), \
+            'Length of symmetry_classes must match length of idxs.'
+        perms = permute_with_symmetry(symmetry_classes)
+        N = len(idxs) + \
+            len(res_idxs) * 3 # number of atoms in CG plus N,CA,C for each aa
+        for struct in structs:
+            occs = struct.getOccupancies()
+            names = struct.getNames()
+            resnames = struct.getResnames()
+            all_coords = struct.getCoords()
+            cg_idxs = np.array(
+                [np.argwhere(occs == 3. + 0.1 * idx)[0][0] 
+                 for idx in idxs]
             )
-            for j in range(len(node_aas)):
-                for name in ['N', 'CA', 'C']: #, O]:
-                    mask = np.logical_and.reduce((occs > 1.,
-                                                  names == name,
-                                                  resnames == node_aas[j][0]))
-                    perm_coords.append(
-                        all_coords[mask][node_aas[j][1]:node_aas[j][1]+1]
-                    )
-            coords_to_add.append(np.vstack(perm_coords))
-        coords += coords_to_add
-    coords = np.array(coords).reshape((len(pdbs), len(perms), -1, 3))
+            coords_to_add = []
+            for perm in perms:
+                perm_coords = np.zeros((N, 3))
+                perm_coords[:len(perm)] = all_coords[cg_idxs[perm]]
+                for j, name in enumerate(['N', 'CA', 'C']):
+                    mask = np.logical_and.reduce((occs > 1., names == name))
+                    perm_coords[len(perm)+j::3] = \
+                        all_coords[mask][np.array(res_idxs)]
+                coords_to_add.append(perm_coords)
+            coords += coords_to_add
+    coords = np.array(coords).reshape((len(all_pdbs), len(perms), -1, 3))
     coords = coords.transpose((1, 0, 2, 3))
     M = coords.shape[1]
     if M == 1:
         return
-    N = len(idxs) + \
-        len(node_aas) * 3 # number of atoms in CG plus N,CA,C for each aa
     # define equal weights for the CG and the mainchain atoms of 
     # interacting residues to be used in the Kabsch alignments
     weights = np.zeros(N)
     weights[:len(idxs)] = 0.5 / len(idxs)
-    weights[len(idxs):] = 0.5 / (len(node_aas) * 3)
+    weights[len(idxs):] = 0.5 / (len(res_idxs) * 3)
     assert np.abs(weights.sum() - 1.) < 1e-8
     # find minimal-RMSD alignments between all pairs of structures
     triu_indices = np.triu_indices(M, 1)
@@ -314,7 +423,7 @@ def cluster_structures(directory, starting_dir, outdir, target_depth,
     all_mems, cents = greedy(A)
     if set([len(cluster) for cluster in all_mems]) == {1}:
         return
-    cl_directory = rebase_path(directory, starting_dir, outdir)
+    cl_directory = '/'.join([outdir] + list(node))
     cluster_dirname = os.path.join(cl_directory, 'clusters')
     os.makedirs(cluster_dirname, exist_ok=True)
     cluster_num = 1
@@ -322,14 +431,13 @@ def cluster_structures(directory, starting_dir, outdir, target_depth,
         assert cent in cluster, f'Centroid {cent} not in cluster {cluster}.'
         if len(cluster) < 2:
             continue
-        # cluster_sorted = [cent] + [el for el in cluster if el != cent]
         cluster_subdirname = \
             os.path.join(cluster_dirname, 'cluster_{}'.format(cluster_num))
         os.makedirs(cluster_subdirname, exist_ok=True)
         seqs = []
-        for el in cluster: # cluster_sorted:
-            pdb_name = pdbs[el]
-            cl_struct = structs[el]
+        for el in cluster:
+            pdb_name = all_pdbs[el]
+            cl_struct = all_structs[el]
             # ensure the matching environments are not homologous
             seq = ''.join([three_to_one[resname] for resname in 
                            cl_struct.getResnames() if resname in aas])
@@ -363,24 +471,12 @@ def cluster_structures(directory, starting_dir, outdir, target_depth,
                     _R = R[idx]
                     _t = t[idx]
                     rmsd = np.sqrt(msd[idx])
-                    # non-centroid was mobile, so it was permuted
-                    # cent_coords = coords[0][cent]
-                    # el_coords = coords[best_perms[idx]][el]
                 else:
                     # centroid was mobile in the Kabsch alignment
                     idx = np.argwhere(cent_mobile).flatten()[0]
                     _R = R[idx].T
                     _t = -np.dot(t[idx], _R)
                     rmsd = np.sqrt(msd[idx])
-                    # centroid was mobile, so el was permuted
-                    # cent_coords = coords[best_perms[idx]][cent]
-                    # el_coords = coords[0][el]
-                '''
-                el_transformed = np.dot(el_coords, _R) + _t
-                test_msd = ((cent_coords - el_transformed) ** 2).sum()
-                test_rmsd = np.sqrt(test_msd)
-                assert np.abs(test_rmsd - rmsd) < 1e-8
-                '''
                 cl_struct.setCoords(
                     np.dot(cl_struct.getCoords(), _R) + _t
                 )
@@ -414,7 +510,8 @@ def cluster_structures_at_depth(starting_dir, outdir, target_depth,
     outdir : str
         The directory at which to output clustered PDB files.
     target_depth : int
-        The depth below which directories should be clustered.
+        The depth in the tree of possible chemical group pocket structures 
+        below which to cluster the structures corresponding to each node.
     cutoff : float, optional
         The RMSD cutoff for greedy clustering, by default 1.0.
     idxs : list, optional
@@ -430,22 +527,14 @@ def cluster_structures_at_depth(starting_dir, outdir, target_depth,
     """
     cg = starting_dir.split('/')[-1].split('_')[0]
     os.makedirs(outdir, exist_ok=True)
-    directories, _, _ = zip(*os.walk(starting_dir, topdown=False))
-    func = partial(cluster_structures, 
+    # directories, _, _ = zip(*os.walk(starting_dir, topdown=False))
+    nodes_dict = construct_nodes(starting_dir, target_depth)
+    func = partial(cluster_structures, nodes_dict=nodes_dict, 
                    starting_dir=starting_dir, outdir=outdir, 
-                   target_depth=target_depth, cg=cg, 
-                   cutoff=cutoff, idxs=idxs, 
+                   cg=cg, cutoff=cutoff, idxs=idxs, 
                    symmetry_classes=symmetry_classes)
     with Pool(n_threads) as p:
-        p.map(func, directories)
-    '''
-    for root, dirs, files in :
-            #     root.split('_')[-1] != '1':
-            # Cluster the structures in the current directory
-            cluster_structures(root, starting_dir, outdir, cg=cg, 
-                               cutoff=cutoff, idxs=idxs, 
-                               symmetry_classes=symmetry_classes)
-    '''
+        p.map(func, nodes_dict.keys())
 
 
 def parse_args():

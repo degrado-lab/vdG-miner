@@ -1,8 +1,9 @@
-
 import os
 import sys
 import gzip
 import subprocess
+
+import numpy as np
 
 from openbabel import openbabel as ob
 
@@ -110,13 +111,16 @@ def find_cg_matches(smarts_pattern, pdb_path, pdb_cluster_file,
     smarts_elements = []
     for i in range(smarts.NumAtoms()):
         smarts_elements.append(elements[smarts.GetAtomicNum(i)])
+    smarts_elements = np.array(smarts_elements)
 
     # Read PDB file and extract ligands as blocks, then search them for CG
     ligands = {} # PDB blocks for each ligand
-    has_element = {} # lists of bools determining whether each ligand has the 
-                     # necessary elements to match the SMARTS pattern
     line_suffixes = {} # suffixes of the HETATM lines for each ligand
     atom_num_to_key = {} # atom numbers as keys and keys to ligands as values
+    last_key = tuple() # the previous HETATM residue encountered, stored as a 
+                       # tuple of (biounit, seg, chain, resnum, resname)
+    has_element = np.zeros(len(smarts_elements), dtype=bool)
+    bad_resnames = [] # list of resnames that fail the element test
     with open(pdb_path, 'rb') as f:
         b_lines = f.readlines()
         for b_line in b_lines:
@@ -124,6 +128,8 @@ def find_cg_matches(smarts_pattern, pdb_path, pdb_cluster_file,
                 if len(b_line) < 100:
                     return
                 if not include_water and b_line[17:20] == b'HOH':
+                    continue
+                if b_line[17:20].strip() in bad_resnames:
                     continue
                 line = b_line.decode('utf-8')
                 seg = line[72:76].strip()
@@ -133,24 +139,31 @@ def find_cg_matches(smarts_pattern, pdb_path, pdb_cluster_file,
                 element = line[76:78].strip()
                 # form the key and construct the ligand block
                 key = (biounit, seg, chain, resnum, resname)
+                if key != last_key:
+                    if not np.all(has_element) and len(last_key):
+                        ligands.pop(last_key)
+                        bad_resnames.append(last_key[-1].encode('utf-8'))
+                    has_element[:] = False
+                    last_key = key
                 if key not in ligands.keys():
                     ligands[key] = line[:80] + '\n'
                     line_suffixes[key] = [b_line[80:]]
-                    has_element[key] = [False] * len(smarts_elements)
-                    first_false = 0
                 else:
                     ligands[key] += line[:80] + '\n'
                     line_suffixes[key].append(b_line[80:])
-                if element in smarts_elements[first_false:]:
-                    has_element[key][
-                        smarts_elements[first_false:].index(element) + 
-                        first_false
-                    ] = True
-                    if False in has_element[key]:
-                        first_false = has_element[key].index(False)
+                # if the element appears in the list of remaining 
+                # elements that haven't been seen yet, mark it seen
+                idxs = np.argwhere(
+                    np.logical_and(~has_element, 
+                                   smarts_elements == element)
+                ).flatten()
+                if len(idxs):
+                    has_element[idxs[0]] = True
+                # print(element, smarts_elements, has_element)
+                # track the atom number for this atom
                 atom_num = b_line[6:11]
                 atom_num_to_key[atom_num] = key
-            if b_line.startswith(b'CONECT'):
+            if b_line.startswith(b'CONECT') and len(ligands):
                 atom0 = b_line[6:11]
                 if atom0 in atom_num_to_key.keys():
                     line_to_add = 'CONECT' + atom0.decode('utf-8')
@@ -160,14 +173,15 @@ def find_cg_matches(smarts_pattern, pdb_path, pdb_cluster_file,
                             line_to_add += atom.decode('utf-8')
                     if len(line_to_add) > 11:
                         ligands[atom_num_to_key[atom0]] += line + '\n'
-    for key, value in has_element.items():
-        if not all(value):
-            ligands.pop(key)
+            elif b_line.startswith(b'CONECT'):
+                return # no ligands were found that match the requirements 
+                       # by the time the CONECT lines were reached at the 
+                       # bottom of the PDB file
     if len(ligands):
         atom_ids = [b_line[6:11] for b_line in b_lines if b'ATOM' in b_line]
         ent_ids = [b_line[81:85] for b_line in b_lines if b'ATOM' in b_line]
     else:
-        return
+        return # no ligands were found that match the requirements
     
     # Find CGs matching SMARTS pattern
     cg_match_dict = {}
