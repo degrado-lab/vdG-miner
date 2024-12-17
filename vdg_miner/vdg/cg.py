@@ -120,6 +120,7 @@ def find_cg_matches(smarts_pattern, pdb_path, pdb_cluster_file,
     last_key = tuple() # the previous HETATM residue encountered, stored as a 
                        # tuple of (biounit, seg, chain, resnum, resname)
     has_element = np.zeros(len(smarts_elements), dtype=bool)
+    has_element[smarts_elements == '*'] = True # account for wildcards
     bad_resnames = [] # list of resnames that fail the element test
     with open(pdb_path, 'rb') as f:
         b_lines = f.readlines()

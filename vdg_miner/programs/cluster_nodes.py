@@ -207,11 +207,11 @@ def kabsch(X, Y, w=None):
         w = np.ones((1, N, 1)) / N
     else:
         w = w.reshape((1, -1, 1)) / w.sum()
-    Xw, Yw = X * w, Y * w
     # compute R using the Kabsch algorithm
-    Xbar, Ybar = np.sum(Xw, axis=1, keepdims=True), \
-                 np.sum(Yw, axis=1, keepdims=True)
-    Xc, Yc = Xw - Xbar, Yw - Ybar
+    Xbar, Ybar = np.sum(X * w, axis=1, keepdims=True), \
+                 np.sum(Y * w, axis=1, keepdims=True)
+    # subtract Xbar and Ybar, then weight the resulting matrices
+    Xc, Yc = np.sqrt(w) * (X - Xbar), np.sqrt(w) * (Y - Ybar)
     H = np.matmul(np.transpose(Xc, (0, 2, 1)), Yc)
     U, S, Vt = np.linalg.svd(H)
     d = np.sign(np.linalg.det(np.matmul(U, Vt)))
@@ -361,7 +361,14 @@ def cluster_structures(node, nodes_dict, starting_dir, outdir,
         pdbs = [os.path.realpath(f) for f in 
                 glob.glob(directory + '/**/*.pdb', recursive=True)]
         all_pdbs += pdbs
-        structs = [pr.parsePDB(pdb) for pdb in pdbs]
+        structs = []
+        for pdb in pdbs:
+            if pdb[-2:] == 'gz':
+                with open(pdb, 'rb') as f:
+                    structs.append(pr.parsePDBStream(f))
+            else:
+                structs.append(pr.parsePDB(pdb))
+        # structs = [pr.parsePDB(pdb) for pdb in pdbs]
         all_structs += structs
         if idxs is None:
             occs0 = structs[0].getOccupancies()
@@ -566,6 +573,7 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+    assert args.target_depth > 0, 'Target depth must be greater than 0.'
     cluster_structures_at_depth(args.starting_dir, args.outdir, 
                                 args.target_depth, args.cutoff, 
                                 args.idxs, args.symmetry_classes, 

@@ -122,8 +122,8 @@ def get_atomgroup(environment, pdb_dir, cg, cg_match_dict,
             whole_struct = pr.parsePDB(pdb_file)
     else:
         whole_struct = prev_struct
-    selstr_template = '(segment {} and chain {} and resnum {})'
-    selstr_template_noseg = '(chain {} and resnum {})'
+    selstr_template = '(segment {} and chain {} and resnum {} and icode _)'
+    selstr_template_noseg = '(chain {} and resnum {} and icode _)'
     scrs, selstrs, selstrs_nbrs = [], [], []
     for tup in environment:
         if tup[3] >= 0:
@@ -329,5 +329,7 @@ if __name__ == "__main__":
                 hierarchy_path = \
                     '/'.join([args.output_hierarchy_dir] + dirs)
                 os.makedirs(hierarchy_path, exist_ok=True)
-                pdb_path = hierarchy_path + '/' + pdb_name + '.pdb'
-                pr.writePDB(pdb_path, atomgroup)
+                pdb_path = hierarchy_path + '/' + pdb_name + '.pdb.gz'
+                with gzip.open(pdb_path, "wb") as f:
+                    pr.writePDBStream(f, atomgroup)
+                # pr.writePDB(pdb_path, atomgroup)
