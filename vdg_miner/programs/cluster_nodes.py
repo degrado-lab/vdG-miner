@@ -1,5 +1,6 @@
 import os
 import sys
+import gzip
 import glob
 import argparse
 import subprocess
@@ -359,12 +360,15 @@ def cluster_structures(node, nodes_dict, starting_dir, outdir,
     all_pdbs, all_structs, coords = [], [], []
     for directory, res_idxs in nodes_dict[node]:
         pdbs = [os.path.realpath(f) for f in 
-                glob.glob(directory + '/**/*.pdb', recursive=True)]
+                glob.glob(directory + '/**/*.pdb.gz', recursive=True)]
+        if not len(pdbs):
+            pdbs = [os.path.realpath(f) for f in 
+                    glob.glob(directory + '/**/*.pdb', recursive=True)]
         all_pdbs += pdbs
         structs = []
         for pdb in pdbs:
             if pdb[-2:] == 'gz':
-                with open(pdb, 'rb') as f:
+                with gzip.open(pdb, 'rt') as f:
                     structs.append(pr.parsePDBStream(f))
             else:
                 structs.append(pr.parsePDB(pdb))
@@ -466,7 +470,8 @@ def cluster_structures(node, nodes_dict, starting_dir, outdir,
                 seqs.append(seq)
             # create the environment PDB file
             if el == cent:
-                pdb_name = pdb_name[:-4] + '_centroid.pdb'
+                split = pdb_name.split('.')
+                pdb_name = split[0] + '_centroid.' + '.'.join(split[1:])
             else:
                 el_mobile = np.logical_and(triu_indices[0] == el,
                                            triu_indices[1] == cent)

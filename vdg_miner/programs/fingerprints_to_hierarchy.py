@@ -225,6 +225,10 @@ def parse_args():
     argp.add_argument('-s', '--abple-singlets', action='store_true',
                       help='Use ABPLE singlets instead of triplets in the '
                       'hierarchy.')
+    argp.add_argument('-n', '--no-abple', action='store_true',
+                      help='Do not use ABPLE in the hierarchy (assigning '
+                      'every residue an ABPLE string of XXX). Overrides '
+                      '--abple-singlets.')
     argp.add_argument('-e', '--exclude-seqdist', action='store_true', 
                       help='Exclude levels based upon sequence distances '
                            'between contacting residues from the hierarchy.')
@@ -292,11 +296,13 @@ if __name__ == "__main__":
                 while True:
                     if dirs[-1] in aas:
                         ABPLE = [feature for feature in 
-                                    features_no_contact 
-                                    if feature in ABPLE_cols and 
-                                    feature[0] == str(current_res)]
+                                 features_no_contact 
+                                 if feature in ABPLE_cols and 
+                                 feature[0] == str(current_res)]
                         if len(ABPLE):
-                            if args.abple_singlets:
+                            if args.no_abple:
+                                dirs.append(ABPLE[0].split('_')[0] + '_XXX')
+                            elif args.abple_singlets:
                                 dirs.append(ABPLE[0].split('_')[0] + '_' + 
                                             ABPLE[0].split('_')[1][1])
                             else:
@@ -304,7 +310,8 @@ if __name__ == "__main__":
                         else:
                             break
                     elif dirs[-1] in ABPLE_cols or \
-                            dirs[-1] in ABPLE_singleton_cols:
+                            dirs[-1] in ABPLE_singleton_cols or \
+                            'XXX' in dirs[-1]:
                         seqdist = [feature for feature in 
                                     features_no_contact 
                                     if feature in seqdist_cols and 
@@ -330,6 +337,8 @@ if __name__ == "__main__":
                     '/'.join([args.output_hierarchy_dir] + dirs)
                 os.makedirs(hierarchy_path, exist_ok=True)
                 pdb_path = hierarchy_path + '/' + pdb_name + '.pdb.gz'
-                with gzip.open(pdb_path, "wb") as f:
+                with gzip.open(pdb_path, "wt") as f:
                     pr.writePDBStream(f, atomgroup)
+                # with gzip.open(pdb_path, "rt") as f:
+                #     _ = pr.parsePDBStream(f)
                 # pr.writePDB(pdb_path, atomgroup)
