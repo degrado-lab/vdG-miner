@@ -237,7 +237,9 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     assert len(args.align_atoms) == 3, 'Must provide three align atoms.'
-    with open(os.path.join(args.fingerprints_dir, 
+    fingerprints_dir = os.path.join(args.fingerprints_dir, 
+                                    args.cg + '_fingerprints')
+    with open(os.path.join(fingerprints_dir, 
                            'fingerprint_cols.txt'), 'r') as f:
         fingerprint_cols = np.array(f.read().split(', '))
     if args.cg_match_dict_pkl is not None:
@@ -248,14 +250,14 @@ if __name__ == "__main__":
     # iterate over subdirectories of the fingerprints directory, 
     # corresponding to the middle two letters of the PDB files 
     # in which environments were found
-    for subdir in os.listdir(args.fingerprints_dir):
-        if not os.path.isdir(os.path.join(args.fingerprints_dir, subdir)):
+    for subdir in os.listdir(fingerprints_dir):
+        if not os.path.isdir(os.path.join(fingerprints_dir, subdir)):
             continue
         # iterate over fingerprints/environments files for 
         # biological assemblies within each subdirectory
         fingerprint_files = [
-            os.path.join(args.fingerprints_dir, subdir, file) for file in 
-            os.listdir(os.path.join(args.fingerprints_dir, subdir))
+            os.path.join(fingerprints_dir, subdir, file) for file in 
+            os.listdir(os.path.join(fingerprints_dir, subdir))
             if file.endswith('_fingerprints.npy')
         ]
         for fingerprint_file in fingerprint_files:
