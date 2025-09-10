@@ -579,7 +579,11 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     assert args.target_depth > 0, 'Target depth must be greater than 0.'
-    cluster_structures_at_depth(args.starting_dir, args.outdir, 
+    assert args.starting_dir.endswith('hierarchies_preclust'), \
+        'Incorrectly formatted starting directory.'
+    outdir = os.path.join(args.outdir, 
+                          os.path.basename(args.starting_dir)[:-9])
+    cluster_structures_at_depth(args.starting_dir, outdir, 
                                 args.target_depth, args.cutoff, 
                                 args.idxs, args.symmetry_classes, 
                                 args.threads)

@@ -145,8 +145,9 @@ def get_atomgroup(environment, pdb_dir, cg, cg_match_dict,
             selstrs_nbrs.append(selstr_template_noseg.format(*nbrs_scr[1:]))
     struct = whole_struct.select(
         ' or '.join(selstrs[:1] + selstrs_nbrs[1:]) + 
-        ' or (same residue as resname HOH within 3 of ({}))'.format(
-            ' or '.join(selstrs[:1])
+        (' or ((same residue as resname HOH within 3 of {}) and '
+         '(same residue as resname HOH within 3 of ({})))').format(
+            selstrs[0], ' or '.join(selstrs[:1])
         )
     ).toAtomGroup()
     # struct = whole_struct.select(
@@ -335,8 +336,10 @@ if __name__ == "__main__":
                         raise ValueError('Invalid feature: ', dirs[-1])
                 # write the environment to a PDB file
                 pdb_name = '_'.join([str(el) for el in environment[0]])
+                hierarchy_dir = os.path.join(args.output_hierarchy_dir, 
+                                             args.cg + '_hierarchies_preclust')
                 hierarchy_path = \
-                    '/'.join([args.output_hierarchy_dir] + dirs)
+                    '/'.join([hierarchy_dir] + dirs)
                 os.makedirs(hierarchy_path, exist_ok=True)
                 pdb_path = hierarchy_path + '/' + pdb_name + '.pdb.gz'
                 with gzip.open(pdb_path, "wt") as f:

@@ -40,12 +40,22 @@ conda env create -f environment.yml -y
 Then, activate the environment:
 ```bash
 conda activate env_prody
+```
 
-### using the code
-This code is intended to generate the necessary pickled objects for the generation of van der Graph 
-(vdG) databases to aid in the design of ligand-binding proteins.  A mirror of the PDB and validation 
-information for each structure is a necessary prerequisite.  These can be downloaded from the 
-PDB FTP server as follows:
+## Usage
+
+Sphinx documentation for the various aspects of this repository, including 
+the preparation of a parent database of protonated biological assemblies 
+from a PDB mirror and the extraction of vdGs, both for proteinaceous and 
+non-proteinaceous chemical groups, from this database, is in progress. 
+A few basic recipes are included below.
+
+### Downloading the prerequisite data from the PDB
+This code is intended to generate the necessary pickled objects for the 
+generation of van der Graph (vdG) databases to aid in the design of 
+ligand-binding proteins.  A mirror of the PDB and validation 
+information for each structure is a necessary prerequisite.  These can 
+be downloaded from the PDB FTP server as follows:
 
 ```bash
 > rsync -rlpt -v -z --delete --port=33444
@@ -55,4 +65,18 @@ PDB FTP server as follows:
   --port=33444 rsync.rcsb.org::ftp/validation_reports/ $LOCAL_VALIDATION_PATH
 ```
 
+## Contributing
+
+If you find places for improvement, please submit a pull request on 
+the [GitHub repository](https://github.com/degrado-lab/vdG-miner).
+
+## License
+
+This project is licensed under the 
+[MIT License](https://github.com/degrado-lab/vdG-miner/blob/main/LICENSE).
+
+## Contact
+
+- [Rian Kormos](https://github.com/rckormos)
+- [Project Repository](https://github.com/degrado-lab/vdG-miner) 
 
